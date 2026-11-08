@@ -7,9 +7,16 @@
 # Logs and artifacts of a public repo are public: raw private build evidence
 # and application outputs are deliberately NOT uploaded by this CI-only file.
 name: Windows build
+run-name: ${{ inputs.verify_access_only && 'Verify private-source access' || 'Build and test Windows' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      verify_access_only:
+        description: 'Only verify private-source access (no Qt download, build or tests)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -20,6 +27,7 @@ concurrency:
 
 jobs:
   build:
+    name: ${{ inputs.verify_access_only && 'Verify private-source access' || 'Windows build and tests' }}
     # Do not give source credentials to workflows from PRs or alternate refs.
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: windows-2022
@@ -63,13 +71,31 @@ jobs:
           submodules: false
           lfs: false
 
+      - name: Verify source layout
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'source'
+          foreach ($relative in @(
+            'qt-native/ci/toolchain-lock.json',
+            'qt-native/scripts/ci-bootstrap.ps1',
+            'qt-native/scripts/test-static-qt-support.ps1',
+            'qt-native/scripts/ci-build-test.ps1'
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $relative) -PathType Leaf)) {
+              throw 'The selected source revision does not contain the required Windows CI inputs.'
+            }
+          }
+          Write-Output 'Private-source access and required build inputs verified.'
+
       - name: Cache public toolchain archives only
+        if: ${{ !inputs.verify_access_only }}
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/mcl-ci-archives
           key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
 
       - name: Build and test source
+        if: ${{ !inputs.verify_access_only }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
