@@ -1,0 +1,115 @@
+# Copy this file to .github/workflows/windows-build.yml in a PUBLIC builder repo.
+# Required builder-repo Actions secrets:
+#   SOURCE_REPOSITORY: owner/private-repo (never put a token in this value)
+#   SOURCE_READ_TOKEN: fine-grained PAT, only that repo, Contents: read
+# Optional SOURCE_REF: source branch/tag/full commit SHA; defaults to master.
+# This runs the existing Windows build + all 42 local CTest groups.
+# Logs and artifacts of a public repo are public: raw private build evidence
+# and application outputs are deliberately NOT uploaded by this CI-only file.
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-source-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Do not give source credentials to workflows from PRs or alternate refs.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate configuration
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repository = $env:SOURCE_REPOSITORY
+          if ([string]::IsNullOrWhiteSpace($repository) -or
+              [string]::IsNullOrWhiteSpace($env:SOURCE_READ_TOKEN)) {
+            throw 'Configure SOURCE_REPOSITORY and SOURCE_READ_TOKEN in this builder repository Actions secrets.'
+          }
+          if ($repository -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z') {
+            throw 'SOURCE_REPOSITORY must be owner/repo, without a URL or credentials.'
+          }
+          # GitHub masks complete secret values. Also mask checkout output that
+          # splits the owner/name or normalizes its casing. This does not mask
+          # artifact contents or guarantee secrecy of every derived value.
+          foreach ($value in @($repository, $repository.ToLowerInvariant()) + $repository.Split('/')) {
+            Write-Output "::add-mask::$value"
+            Write-Output "::add-mask::$($value.ToLowerInvariant())"
+          }
+
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_READ_TOKEN }}
+          ref: ${{ secrets.SOURCE_REF || 'master' }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+          submodules: false
+          lfs: false
+
+      - name: Cache public toolchain archives only
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/mcl-ci-archives
+          key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
+
+      - name: Build and test source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $scripts = Join-Path $sourceRoot 'qt-native/scripts'
+          $privateLogs = Join-Path $env:RUNNER_TEMP 'private-build-logs'
+          $null = New-Item -ItemType Directory -Path $privateLogs -ErrorAction Stop
+          $workflowSha = $env:GITHUB_SHA
+          try {
+            $sourceSha = (& git -C $sourceRoot rev-parse --verify HEAD 2>$null)
+            if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '\A[0-9a-f]{40}\z') {
+              throw 'Source identity could not be verified.'
+            }
+            Write-Output "::add-mask::$sourceSha"
+            # ci-build-test.ps1 records GITHUB_SHA as its source revision. In a
+            # separate builder repo it must receive the checked-out source SHA.
+            # Preserve both identities privately rather than mislabel a run.
+            @{ workflowCommit = $workflowSha; sourceCommit = $sourceSha } |
+              ConvertTo-Json | Set-Content (Join-Path $privateLogs 'identity.json')
+            $env:GITHUB_SHA = $sourceSha
+            $tasks = @(
+              @{ name = 'toolchain'; file = 'ci-bootstrap.ps1'; args = @('-Run') },
+              @{ name = 'script-fixtures'; file = 'test-static-qt-support.ps1'; args = @('-Run') },
+              @{ name = 'build-and-test'; file = 'ci-build-test.ps1'; args = @('-Run', '-Mode', 'dynamic') }
+            )
+            foreach ($task in $tasks) {
+              $script = Join-Path $scripts $task.file
+              if (-not (Test-Path -LiteralPath $script -PathType Leaf)) { throw 'Required source build script is missing.' }
+              $log = Join-Path $privateLogs ($task.name + '.log')
+              & pwsh -NoLogo -NoProfile -NonInteractive -File $script @($task.args) *> $log
+              if ($LASTEXITCODE -ne 0) { throw 'A private build stage failed.' }
+              Write-Output "$($task.name): passed"
+            }
+            'Fresh Windows build and local regression checks passed.' |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          } catch {
+            # Compiler/test diagnostics can contain source lines. Do not echo
+            # exception bodies or upload these logs from this public workflow.
+            Write-Error -ErrorAction Continue 'Build failed. Detailed source logs remain on the ephemeral runner and are not published.'
+            exit 1
+          } finally {
+            $env:GITHUB_SHA = $workflowSha
+          }
