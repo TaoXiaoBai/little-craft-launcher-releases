@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -201,6 +202,7 @@ def write_documentation(stage: Path, tag: str) -> None:
         "The full LGPLv3/GPLv3 and third-party texts collected from the matching official\n"
         "Qt modules are in licenses/Qt/. miniz, the unchanged Koring wallpaper, Roboto and\n"
         "Material Symbols notices and license texts are under their licenses/ folders.\n"
+        "The bundled ICU 73.2 runtime is covered by licenses/ICU/LICENSE.txt.\n"
         "Qt system dependencies (including OpenSSL, X11/XCB, graphics and font libraries)\n"
         "are supplied by the operating system and are not included in this archive.\n\n"
         "SUPPORTING_MATERIALS.zip contains these dependency notices and this replacement\n"
@@ -270,6 +272,14 @@ def package(args: argparse.Namespace) -> Path:
         subprocess.run([strip, "--strip-unneeded", str(stage / executable.name)], check=True, capture_output=True)
         copy_runtime(qt_root, stage)
         copy_legal_material(source_root, stage)
+        icu = sorted((stage / "lib").glob("libicu*.so.*"))
+        require(bool(icu) and all(path.resolve(strict=True).name.endswith(".so.73.2") for path in icu),
+                "The bundled ICU runtime must match the supplied ICU 73.2 notice.")
+        icu_license = Path(__file__).resolve().parent / "licenses/ICU-73.2-LICENSE.txt"
+        require(hashlib.sha256(icu_license.read_bytes()).hexdigest() ==
+                "f3005e195ff74d8812cc1f182a1c446fab678d70a10e3dada497585befee5416",
+                "The ICU 73.2 license text did not match its fixed source.")
+        copy_file(icu_license, stage / "licenses/ICU/LICENSE.txt")
         write_documentation(stage, args.tag)
         validate_stage(stage)
         temporary_archive = scratch_root / final.name
