@@ -10,10 +10,10 @@ on:
         type: string
         default: v1.0.0-pre.2
       profile:
-        description: 'Legacy font investigation or repeated native Windows control checks'
+        description: 'Legacy fonts, native controls, or a favorites cache-configuration comparison'
         required: false
         type: choice
-        options: [legacy, native-controls]
+        options: [legacy, native-controls, favorites]
         default: legacy
       source_ref:
         description: 'Optional full commit SHA containing reviewed test-only fixes'

@@ -5,7 +5,7 @@
 param(
     [Parameter(Mandatory)][string]$SourceRoot,
     [string]$PrivateLogDirectory = '',
-    [ValidateSet('legacy', 'native-controls')][string]$Profile = 'legacy'
+    [ValidateSet('legacy', 'native-controls', 'favorites')][string]$Profile = 'legacy'
 )
 
 Set-StrictMode -Version Latest
@@ -35,15 +35,19 @@ if ($logs -ieq $source -or $logs.StartsWith($source + '\', [StringComparison]::O
 }
 $null = [IO.Directory]::CreateDirectory($logs)
 $logs = Ordinary $logs $true
-$build = Join-Path $native $(if ($Profile -eq 'native-controls') { 'build-theme-controls-diagnostic' } else { 'build-native-ui-diagnostic' })
+$build = Join-Path $native $(if ($Profile -eq 'native-controls') { 'build-theme-controls-diagnostic' } elseif ($Profile -eq 'favorites') { 'build-favorites-ui-diagnostic' } else { 'build-native-ui-diagnostic' })
 if (Test-Path -LiteralPath $build) { throw 'Diagnostic compilation requires a fresh build directory.' }
 $steps = [Collections.Generic.List[object]]::new()
 $failure = $null
 $sourceSha = $null
 $fontFiles = @()
 $nativeControls = $Profile -eq 'native-controls'
+$favorites = $Profile -eq 'favorites'
+$favoritesFontDirectory = $null
+$favoritesConfigurations = [Collections.Generic.List[object]]::new()
+$favoritesQmlCache = $null
 $qpa = if ($nativeControls) { 'windows' } else { 'offscreen' }
-$buildJobs = if ($nativeControls) { [Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount)) } else { 2 }
+$buildJobs = if ($Profile -ne 'legacy') { [Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount)) } else { 2 }
 
 # Keep subprocess stdout/stderr as direct private files. Exceptions retain their
 # labels, exit codes and original stack trace in the outer private workflow log.
@@ -64,7 +68,8 @@ function RunLogged([string]$Program, [string[]]$Arguments, [string]$Label,
             'CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'MCL_DATA_ROOT', 'MCL_NATIVE_DATA_ROOT',
             'MCL_PORTABLE_DIR', 'MCL_TEST_JAVA', 'MCL_AUTHLIB_REAL_FETCH', 'MCL_REGION_REAL_PROBE',
             'MCL_NATIVE_UI_EVIDENCE', 'MCL_EXTERNAL_AUTH_UI_EVIDENCE', 'MCL_WINMD_UI_EVIDENCE',
-            'MCL_MOD_FAVORITES_UI_EVIDENCE', 'MCL_UI_REGRESSION_EVIDENCE', 'MCL_CRASH_UI_EVIDENCE')) {
+            'MCL_MOD_FAVORITES_UI_EVIDENCE', 'MCL_UI_REGRESSION_EVIDENCE', 'MCL_CRASH_UI_EVIDENCE',
+            'QML_DISABLE_DISK_CACHE', 'QML_FORCE_DISK_CACHE', 'QML_DISK_CACHE', 'QML_DISK_CACHE_PATH')) {
         $null = $psi.Environment.Remove($name)
     }
     foreach ($name in $Environment.Keys) { $psi.Environment[$name] = [string]$Environment[$name] }
@@ -99,6 +104,17 @@ function RunLogged([string]$Program, [string[]]$Arguments, [string]$Label,
     }
 }
 
+function QmlCacheStats([string]$Path) {
+    $directory = Ordinary $Path $true
+    $fileCount = 0
+    $byteCount = 0L
+    foreach ($entry in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
+        $null = Ordinary $entry.FullName $entry.PSIsContainer
+        if (-not $entry.PSIsContainer) { $fileCount++; $byteCount += $entry.Length }
+    }
+    return [ordered]@{ files = $fileCount; bytes = $byteCount }
+}
+
 try {
     $sourceSha = (& git -C $source rev-parse --verify HEAD)
     if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Cannot verify the diagnostic source revision.' }
@@ -126,10 +142,14 @@ try {
         QT_FORCE_STDERR_LOGGING = '1'
         QT_PLUGIN_PATH = (Join-Path $qt 'plugins'); QML_IMPORT_PATH = (Join-Path $qt 'qml')
     }
-    if (-not $nativeControls) {
+    if ($Profile -eq 'legacy') {
         $screenshots = Join-Path $logs 'screenshots-baseline'
         $null = [IO.Directory]::CreateDirectory($screenshots)
         $environment['MCL_NATIVE_UI_EVIDENCE'] = $screenshots
+    }
+    if ($favorites) {
+        $favoritesFontDirectory = Ordinary (Join-Path $env:WINDIR 'Fonts') $true
+        $environment['QT_QPA_FONTDIR'] = $favoritesFontDirectory
     }
     $configure = @('-S', $native, '-B', $build, '-G', 'Ninja',
         "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_C_COMPILER=$(Join-Path $mingw 'gcc.exe')",
@@ -137,7 +157,61 @@ try {
         '-DCMAKE_BUILD_TYPE=Release', '-DMCL_STATIC_RELEASE=OFF', '-DMCL_CORE_ONLY=OFF',
         '-DBUILD_TESTING=ON', '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF',
         '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF')
-    if ($nativeControls) {
+    if ($favorites) {
+        RunLogged $cmake $configure 'configure-favorites' 300 $environment
+        RunLogged $cmake @('--build', $build, '--target', 'mod_favorites_ui_tests', '--parallel', [string]$buildJobs) `
+            'build-favorites' 1500 $environment
+        $test = Ordinary (Join-Path $build 'mod_favorites_ui_tests.exe')
+        $testSha256 = (Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant()
+        # Two named configurations on one fresh executable, never failure
+        # retries. Both run even if the earlier process fails or times out.
+        foreach ($configuration in @('disabled', 'default-cache')) {
+            $testEnvironment = $environment.Clone()
+            foreach ($name in @('QML_DISABLE_DISK_CACHE', 'QML_FORCE_DISK_CACHE', 'QML_DISK_CACHE', 'QML_DISK_CACHE_PATH')) {
+                $null = $testEnvironment.Remove($name)
+            }
+            if ($configuration -eq 'disabled') {
+                $testEnvironment['QML_DISABLE_DISK_CACHE'] = '1'
+            } else {
+                $qmlCache = Join-Path $scratch 'qml-cache/favorites-default'
+                if (Test-Path -LiteralPath $qmlCache) { throw 'The Qt-default comparison requires a new empty compiled-cache directory.' }
+                $null = [IO.Directory]::CreateDirectory($qmlCache)
+                $cacheBefore = QmlCacheStats $qmlCache
+                if ($cacheBefore.files -ne 0 -or $cacheBefore.bytes -ne 0) { throw 'The compiled QML cache was not initially empty.' }
+                $testEnvironment['QML_DISK_CACHE_PATH'] = $qmlCache
+                $favoritesQmlCache = [ordered]@{
+                    relativeToBuild = 'ci-tmp/qml-cache/favorites-default'
+                    initialFiles = $cacheBefore.files; initialBytes = $cacheBefore.bytes
+                    finalFiles = $null; finalBytes = $null; uploaded = $false
+                }
+            }
+            $label = 'favorites-' + $configuration
+            $textLog = Join-Path $logs ($label + '.txt')
+            RunLogged $test @('-o', ($textLog + ',txt'), '-o', '-,txt') $label 180 $testEnvironment -AllowFailure
+            $outcome = $steps[$steps.Count - 1]
+            $afterSha256 = (Get-FileHash -LiteralPath $test -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($afterSha256 -cne $testSha256) { throw 'The comparison executable changed between configurations.' }
+            if ($configuration -eq 'default-cache') {
+                $cacheAfter = QmlCacheStats $qmlCache
+                $favoritesQmlCache.finalFiles = $cacheAfter.files
+                $favoritesQmlCache.finalBytes = $cacheAfter.bytes
+            }
+            $favoritesConfigurations.Add([ordered]@{
+                name = $configuration; executableSha256 = $afterSha256
+                exitCode = $outcome.exitCode; timedOut = $outcome.timedOut; elapsedMs = $outcome.elapsedMs
+                textLogNonEmpty = ((Test-Path -LiteralPath $textLog -PathType Leaf) -and (Get-Item -LiteralPath $textLog).Length -gt 0)
+                cacheEnvironment = [ordered]@{
+                    QML_DISABLE_DISK_CACHE = $testEnvironment['QML_DISABLE_DISK_CACHE']
+                    QML_FORCE_DISK_CACHE = $testEnvironment['QML_FORCE_DISK_CACHE']
+                    QML_DISK_CACHE = $testEnvironment['QML_DISK_CACHE']
+                    QML_DISK_CACHE_PATH = $testEnvironment['QML_DISK_CACHE_PATH']
+                }
+            })
+        }
+        if (@($favoritesConfigurations | Where-Object { $_.exitCode -ne 0 -or $_.timedOut -or -not $_.textLogNonEmpty }).Count) {
+            throw 'At least one favorites configuration failed, timed out or omitted its QtTest text log; both original results are retained.'
+        }
+    } elseif ($nativeControls) {
         RunLogged $cmake $configure 'configure-native-controls' 300 $environment
         RunLogged $cmake @('--build', $build, '--target', 'theme_controls_tests', '--parallel', [string]$buildJobs) `
             'build-native-controls' 1500 $environment
@@ -201,16 +275,22 @@ try {
 } finally {
     [ordered]@{
         schema = 2; sourceCommit = $sourceSha; workflowCommit = $env:GITHUB_SHA; profile = $Profile
-        scope = $(if ($nativeControls) { 'Diagnostic theme_controls only; not the complete 42-group release gate' } else { 'Diagnostic native_ui only; not the complete 42-group release gate' })
+        scope = $(if ($favorites) { 'Diagnostic mod_favorites_ui only; not the complete 42-group release gate' } elseif ($nativeControls) { 'Diagnostic theme_controls only; not the complete 42-group release gate' } else { 'Diagnostic native_ui only; not the complete 42-group release gate' })
         platform = 'Windows'; qpa = $qpa; qtQuickBackend = 'software'; buildParallel = $buildJobs
-        testGroups = @($(if ($nativeControls) { 'theme_controls' } else { 'native_ui' }))
-        nativeUiTimeoutSeconds = $(if ($nativeControls) { $null } else { 600 })
+        testGroups = @($(if ($favorites) { 'mod_favorites_ui' } elseif ($nativeControls) { 'theme_controls' } else { 'native_ui' }))
+        nativeUiTimeoutSeconds = $(if ($Profile -eq 'legacy') { 600 } else { $null })
         nativeControlsTimeoutSeconds = $(if ($nativeControls) { 120 } else { $null })
         expectedNativeControlsRepetitions = $(if ($nativeControls) { 3 } else { 0 })
         completedNativeControlsRepetitions = @($steps | Where-Object { $_.name -like 'native-controls-run-*' }).Count
+        favoritesTimeoutSeconds = $(if ($favorites) { 180 } else { $null })
+        expectedFavoritesConfigurations = $(if ($favorites) { 2 } else { 0 })
+        completedFavoritesConfigurations = $favoritesConfigurations.Count
+        favoritesConfigurations = $favoritesConfigurations.ToArray()
+        favoritesQmlCache = $favoritesQmlCache
+        favoritesFontDirectory = $favoritesFontDirectory
         success = ($null -eq $failure); systemFontFiles = $fontFiles
-        captureScreenshots = (-not $nativeControls); releaseGate = $false; binariesPublished = $false
-        profiles = @($(if ($nativeControls) { 'Whole theme_controls suite in three independent native Windows processes' } else { 'Full suite without QT_QPA_FONTDIR'; 'Two targeted cases with QT_QPA_FONTDIR pointing to Windows Fonts' }))
+        captureScreenshots = ($Profile -eq 'legacy'); releaseGate = $false; binariesPublished = $false
+        profiles = @($(if ($favorites) { 'Whole mod_favorites_ui with QML_DISABLE_DISK_CACHE=1'; 'Same executable and whole suite with default Qt AOT and a new empty compiled QML cache' } elseif ($nativeControls) { 'Whole theme_controls suite in three independent native Windows processes' } else { 'Full suite without QT_QPA_FONTDIR'; 'Two targeted cases with QT_QPA_FONTDIR pointing to Windows Fonts' }))
         steps = $steps.ToArray()
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $logs 'diagnostic-result.json') -Encoding utf8
 }
