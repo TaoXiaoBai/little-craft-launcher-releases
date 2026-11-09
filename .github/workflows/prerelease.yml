@@ -122,14 +122,14 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/qt-linux
-          key: linux-x86_64-qt-6.8.3-gcc64-imageformats-svg-v1
+          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v2
 
       - name: Install Linux Qt 6.8.3
         if: runner.os == 'Linux' && steps.linux-qt.outputs.cache-hit != 'true'
         run: |
           python -m pip install 'aqtinstall==3.3.0'
           # QtSvg is part of the base Qt 6.8.3 archive set, not an addon module.
-          python -m aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats -O "$RUNNER_TEMP/qt-linux"
+          python -m aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats --archives qtbase qtdeclarative qtsvg icu -O "$RUNNER_TEMP/qt-linux"
 
       - name: Build, test and package Linux privately
         if: runner.os == 'Linux'
