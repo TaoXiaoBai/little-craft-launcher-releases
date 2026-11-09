@@ -19,13 +19,13 @@ Windows 10/11 x64 · 十二套主题 · Qt 6.8 / C++20 / QML
 ![启动台开发版界面预览](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 准备中，本仓库尚未提供正式安装包。** 本页介绍开发版本；可下载的构建、各版本支持的功能和安装方式，将在 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 中提供。
+> **1.0.0 现处于预发布测试阶段，尚无正式版。** [v1.0.0-pre.4](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases/tag/v1.0.0-pre.4) 提供 Windows x64 运行包和 Linux x86_64 界面实验预览。请先阅读发行说明中的安装方式、登录状态及 Linux 限制；Linux 预览暂不支持游戏启动和在线凭据保存。
 >
 > 预览界面使用简体中文。截图来自开发窗口，不是已发布的 Windows 版本。
 
-## 正式版本发布后三步开始
+## 试用预发布版本
 
-1. **下载并校验。** 从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载，阅读发行说明并核对 SHA-256。静态 EXE 可以直接运行；动态包需要完整解压。
+1. **下载并校验。** 从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载，阅读发行说明并核对 SHA-256。当前 Windows ZIP 需完整解压后运行 `mclauncher-qt.exe`，请保留相邻的 DLL 与运行库目录。
 2. **添加账号，选择 Java。** 可用的账号类型取决于地区，见下文[账号与数据](#账号与数据)。
 3. **创建或导入实例。** 选择游戏版本和加载器，等游戏文件准备好后从首页启动。更换版本或整合包前，请先备份存档。
 
@@ -98,12 +98,12 @@ LittleSkin 只是地址建议，不代表自动信任。外置认证仅在用户
 
 项目由 [TaoXiaoBai](https://github.com/TaoXiaoBai) 维护。本仓库是公开的项目介绍、版本发布和[问题反馈](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues)入口。
 
-反馈时请附启动器版本、Windows 版本、复现步骤、预期与实际行为，以及相关的脱敏日志。分享前请自行检查日志；不要公开密码、访问令牌、账号库或私人存档。
+反馈时请附启动器版本、操作系统、复现步骤、预期与实际行为，以及相关的脱敏日志。分享前请自行检查日志；不要公开密码、访问令牌、账号库或私人存档。
 
 ## 源码与许可
 
 应用源码暂未公开，待启动器稳定后再评估开源安排，时间尚未确定。本公开仓库不授予应用的一般性开源或任意再分发许可。
 
-第三方组件与素材继续遵循各自的许可。适用的通知、许可文本及与版本匹配的源码或可重链接材料，将随正式版本提供，并在发布说明中给出获取入口。应用开发保持私有，不免除这些交付义务。
+第三方组件与素材继续遵循各自的许可。适用的通知、许可文本及与版本匹配的依赖源码或可重链接材料，随预发布及正式版本提供，并在发布说明中给出获取入口。应用开发保持私有，不免除这些交付义务。
 
 本项目是独立的第三方启动器，并非 Mojang 或 Microsoft 官方产品，亦不与外置认证服务运营方存在隶属关系。

@@ -19,13 +19,13 @@ Windows 10/11 x64 · Twelve themes · Qt 6.8 / C++20 / QML
 ![Launchpad development preview](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 is in preparation. This repository has no official installation package yet.** This page introduces the development version. Downloadable builds, their supported features and installation instructions will appear in [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases).
+> **1.0.0 is in prerelease testing.** [v1.0.0-pre.4](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases/tag/v1.0.0-pre.4) provides a Windows x64 runtime package and a Linux x86_64 experimental interface preview. There is no stable release yet. Read the release notes for installation, sign-in availability and Linux limitations.
 >
 > Interface previews use Simplified Chinese. The screenshots show development windows, not a released Windows build.
 
-## Start playing after release
+## Try the prerelease
 
-1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. A static EXE runs as it is; extract a dynamic package in full.
+1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. Extract the current Windows ZIP in full and run `mclauncher-qt.exe`; keep its DLLs and runtime folders together.
 2. **Add an account and choose Java.** Which account types you can use depends on your region; see [Accounts and data](#accounts-and-data).
 3. **Create or import an instance.** Pick a game version and loader, wait for the game files, then launch from Home. Back up your worlds before changing versions or modpacks.
 
@@ -98,12 +98,12 @@ LittleSkin is an address suggestion, not automatic trust. External authenticatio
 
 Maintained by [TaoXiaoBai](https://github.com/TaoXiaoBai). This repository is the public home for project information, releases and [issue reports](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues).
 
-When reporting a problem, include the launcher version, Windows version, reproduction steps, expected and actual behavior, and only the relevant redacted logs. Review logs before sharing them. Keep passwords, access tokens, account databases and private worlds out of public reports.
+When reporting a problem, include the launcher version, operating system, reproduction steps, expected and actual behavior, and only the relevant redacted logs. Review logs before sharing them. Keep passwords, access tokens, account databases and private worlds out of public reports.
 
 ## Source and licensing
 
 The application source is currently private. Opening the source will be evaluated after the launcher stabilizes; no date has been set. This public repository does not grant a general open-source or unrestricted application-redistribution license.
 
-Third-party components and artwork retain their own licenses. Applicable notices, license texts and version-matched source or relinking materials will be provided with each release through the links in its release notes. Keeping application development private does not remove those obligations.
+Third-party components and artwork retain their own licenses. Applicable notices, license texts and version-matched dependency sources or relinking materials are provided with each preview or stable release through its release notes. Keeping application development private does not remove those obligations.
 
 This project is an independent third-party launcher, not an official Mojang or Microsoft product, and is not affiliated with external authentication providers.
