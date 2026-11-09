@@ -200,6 +200,7 @@ jobs:
             source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
             source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
           key: qt-6.8.3-public-source-archives-a32f9f88e9c283c326cb94a3c1006ebdaf817d20a471da555995ae051a17fa44
+          restore-keys: qt-6.8.3-public-source-archives-
           enableCrossOsArchive: true
 
       - name: Install Linux build dependencies
