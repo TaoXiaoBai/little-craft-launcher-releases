@@ -52,7 +52,11 @@ def main():
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
-                        raise RuntimeError("Extracted GUI exited before the startup check completed")
+                        log.flush()
+                        details = (root / "gui.log").read_text(errors="replace")
+                        raise RuntimeError(
+                            f"Extracted GUI exited with code {process.returncode} before the startup check completed:\n{details}"
+                        )
                     time.sleep(0.2)
                 # Inspect the application process, not the xvfb wrapper. Qt must
                 # come from this package; an absolute build RPATH is insufficient.

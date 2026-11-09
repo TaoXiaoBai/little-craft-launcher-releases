@@ -7,6 +7,10 @@ when manually dispatched on the default branch.
 1. Create an immutable prerelease tag in the private source repository, such as
    `v1.0.0-pre.1`. Both platforms check out that exact tag; the optional
    `SOURCE_REF` used by the older access-check workflow is not used here.
+   An optional full `source_ref` commit may supply a reviewed test-only fix.
+   CI compares it to the immutable release tag and permits changes only to
+   `qt-native/tests/`, `ci-build-test.ps1` and the CI README. Application
+   sources, resources, configuration and toolchain inputs must remain identical.
 2. Keep `SOURCE_REPOSITORY` and the repository-scoped, Contents-read
    `SOURCE_READ_TOKEN` in this repository's Actions secrets. The source checkout
    never persists the token. No source-write token is required by CI.
@@ -20,6 +24,13 @@ when manually dispatched on the default branch.
    archives. It creates SHA-256 checksums and publishes with `prerelease=true`
    and `latest=false`. A failed upload leaves a draft, not a partial public
    release. A tag already associated with a release must not be reused.
+
+For a packaging-only repair, select `windows` or `linux` to run that platform's
+full build, tests and startup check without publishing. After both platform jobs
+succeed, **Publish verified prerelease packages** can combine their exact run
+IDs. It checks repository/workflow/tag identity, platform-job success, package
+metadata and dependency hashes before publication. It never accepts a failed
+platform job or substitutes a historical test report for a new package check.
 
 Windows archives must be extracted in full. Linux is an experimental interface
 preview: the current game resolver, managed Java and credential storage are

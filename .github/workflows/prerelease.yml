@@ -17,6 +17,10 @@ on:
           - both
           - windows
           - linux
+      source_ref:
+        description: 'Optional full commit SHA for test/CI-only fixes; production inputs must match the release tag'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -42,10 +46,14 @@ jobs:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
           VERSION_TAG: ${{ inputs.tag }}
+          TEST_SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:VERSION_TAG -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+\z') {
             throw 'A prerelease tag such as v1.0.0-pre.1 is required.'
+          }
+          if ($env:TEST_SOURCE_REF -and $env:TEST_SOURCE_REF -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw 'A test-only source override must be a full commit SHA.'
           }
           if ($env:SOURCE_REPOSITORY -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z' -or
               [string]::IsNullOrWhiteSpace($env:SOURCE_READ_TOKEN)) {
@@ -67,13 +75,43 @@ jobs:
         with:
           repository: ${{ secrets.SOURCE_REPOSITORY }}
           token: ${{ secrets.SOURCE_READ_TOKEN }}
-          ref: refs/tags/${{ inputs.tag }}
+          ref: ${{ inputs.source_ref || format('refs/tags/{0}', inputs.tag) }}
           path: source
           fetch-depth: 1
           persist-credentials: false
           show-progress: false
           submodules: false
           lfs: false
+
+      - name: Verify test-only override leaves release application inputs unchanged
+        if: inputs.source_ref != ''
+        shell: pwsh
+        env:
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('x-access-token:' + $env:SOURCE_READ_TOKEN))
+          Write-Output "::add-mask::$authorization"
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = 'AUTHORIZATION: basic ' + $authorization
+          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $tagRef = 'refs/tags/' + $env:VERSION_TAG + ':refs/tags/release-code'
+          & git -C $source fetch --depth=1 --no-tags origin $tagRef
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the immutable release code tag.' }
+          $changed = @(& git -C $source diff --name-only refs/tags/release-code HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not compare the release application inputs.' }
+          $allowed = @('qt-native/scripts/ci-build-test.ps1', 'qt-native/ci/README.md')
+          foreach ($path in $changed) {
+            if (-not $path.StartsWith('qt-native/tests/', [StringComparison]::Ordinal) -and $path -cnotin $allowed) {
+              throw 'A source override may change only the reviewed tests and CI harness files.'
+            }
+          }
+          foreach ($key in @('GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0')) {
+            Remove-Item ('Env:' + $key)
+          }
+          Write-Output 'Release application sources, resources, configuration and toolchain inputs match the immutable tag.'
 
       - name: Cache verified public Windows toolchain archives
         if: runner.os == 'Windows'
@@ -159,8 +197,14 @@ jobs:
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
               --build-dir "$RUNNER_TEMP/build-linux" --qt-root "$qt_root" \
               --output-dir "$RUNNER_TEMP/release-assets" --tag "$VERSION_TAG"
-            python builder/.github/scripts/smoke-linux.py \
-              --archive "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"
+            if ! python builder/.github/scripts/smoke-linux.py \
+              --archive "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"; then
+              runtime_archive="$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"
+              if test "$(stat -c %s "$runtime_archive")" -le 104857600; then
+                cp "$runtime_archive" "$RUNNER_TEMP/private-build-logs/runtime-package.tar.gz"
+              fi
+              exit 1
+            fi
             # The already-packaged application stays in the same build tree.
             # Upload remains gated on every local test passing afterwards.
             cmake --build "$RUNNER_TEMP/build-linux" --parallel 2
