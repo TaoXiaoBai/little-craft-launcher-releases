@@ -22,6 +22,14 @@ MAX_ENTRIES = 10000
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
+class DiagnosticLimitError(ValueError):
+    pass
+
+
+class OpenSSLUnavailableError(RuntimeError):
+    pass
+
+
 def ordinary(path, *, directory=False):
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & REPARSE_POINT:
@@ -32,7 +40,7 @@ def ordinary(path, *, directory=False):
     return info
 
 
-def files_under(root):
+def files_under(root, *, exclude_screenshots=False):
     ordinary(root, directory=True)
     result = []
     stack = [root]
@@ -44,7 +52,7 @@ def files_under(root):
         for item in sorted(parent.iterdir(), key=lambda value: value.name):
             entries += 1
             if entries > MAX_ENTRIES:
-                raise ValueError("Too many diagnostic directory entries")
+                raise DiagnosticLimitError("Too many diagnostic directory entries")
             if "\\" in item.name or ":" in item.name or any(ord(char) < 32 for char in item.name):
                 raise ValueError("Unsupported diagnostic file name")
             info = item.lstat()
@@ -53,10 +61,14 @@ def files_under(root):
                 stack.append(item)
                 continue
             info = ordinary(item)
+            # Validate even excluded entries first: screenshot filtering must
+            # never make links, devices or malformed paths acceptable inputs.
+            if exclude_screenshots and item.suffix.lower() == ".png":
+                continue
             result.append((item, info))
             total += info.st_size
             if len(result) > MAX_FILES or total > MAX_BYTES:
-                raise ValueError("Diagnostic archive limit exceeded")
+                raise DiagnosticLimitError("Diagnostic archive limit exceeded")
     return sorted(result, key=lambda value: value[0].relative_to(root).as_posix())
 
 
@@ -74,7 +86,7 @@ def write_archive(destination, root, entries):
                     while block := source.read(1024 * 1024):
                         total += len(block)
                         if total > MAX_BYTES:
-                            raise ValueError("Diagnostic archive limit exceeded")
+                            raise DiagnosticLimitError("Diagnostic archive limit exceeded")
                         target.write(block)
                 after = os.fstat(source.fileno())
                 if after.st_size != before.st_size or after.st_mtime_ns != before.st_mtime_ns:
@@ -88,12 +100,12 @@ def openssl_path():
     fallback = Path("C:/Program Files/Git/usr/bin/openssl.exe")
     if os.name == "nt" and fallback.is_file():
         return str(fallback)
-    raise ValueError("OpenSSL is unavailable")
+    raise OpenSSLUnavailableError("OpenSSL is unavailable")
 
 
-def encrypt(certificate, root, output):
+def encrypt(certificate, root, output, *, exclude_screenshots=False):
     ordinary(certificate)
-    entries = files_under(root)
+    entries = files_under(root, exclude_screenshots=exclude_screenshots)
     output.parent.mkdir(parents=True, exist_ok=True)
     ordinary(output.parent, directory=True)
     if output.exists() or output.is_symlink():
@@ -129,13 +141,24 @@ def main():
     parser.add_argument("--certificate", type=Path, required=True)
     parser.add_argument("--logs-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--exclude-screenshots", action="store_true",
+                        help="Omit ordinary PNG files while preserving input validation and archive limits")
     arguments = parser.parse_args()
     try:
-        encrypt(arguments.certificate.absolute(), arguments.logs_dir.absolute(), arguments.output.absolute())
-    except Exception:
+        encrypt(arguments.certificate.absolute(), arguments.logs_dir.absolute(), arguments.output.absolute(),
+                exclude_screenshots=arguments.exclude_screenshots)
+    except Exception as failure:
         # Exceptions, subprocess errors and file paths can contain source or
-        # credentials. Never forward their bodies into a public Actions log.
-        print("Private diagnostics encryption failed; no plaintext was published.", file=sys.stderr)
+        # credentials. Publish only a fixed category, never their bodies.
+        if isinstance(failure, DiagnosticLimitError):
+            category = "input_limit"
+        elif isinstance(failure, (OpenSSLUnavailableError, subprocess.SubprocessError)):
+            category = "openssl"
+        elif isinstance(failure, OSError):
+            category = "filesystem"
+        else:
+            category = "invalid_input"
+        print(f"Private diagnostics encryption failed ({category}); no plaintext was published.", file=sys.stderr)
         return 1
     print("Encrypted diagnostics archive created.")
     return 0

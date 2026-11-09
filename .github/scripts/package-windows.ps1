@@ -130,9 +130,17 @@ foreach ($script in @('ci-bootstrap.ps1', 'ci-build-test.ps1', 'fetch-qt-license
 }
 $sourceCommit = (& git -C $source rev-parse --verify HEAD)
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Could not identify the private source revision.' }
+$python = Ordinary (Get-Command python -CommandType Application -ErrorAction Stop).Source
+$cacheVerifier = Ordinary (Join-Path $PSScriptRoot 'verify-cache-inputs.py')
 RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-bootstrap.ps1'), '-Run') 'bootstrap'
-RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-build-test.ps1'), '-Run', '-Mode', 'dynamic') 'build-and-all-local-tests' 100 @{ GITHUB_SHA = $sourceCommit }
+RunProgram $python @($cacheVerifier, '--kind', 'windows-archives', '--source-root', $source, '--cache-root', (Join-Path $env:RUNNER_TEMP 'mcl-ci-archives')) 'verify-toolchain-cache'
+if ($env:GITHUB_OUTPUT) { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "toolchain_verified=true`n", [Text.UTF8Encoding]::new($false)) }
+# Acquire and validate legal inputs before the long build/test gate. A later
+# application failure can still retain these verified public download bytes.
 RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'fetch-qt-license-sources.ps1'), '-Run') 'qt-legal-materials'
+RunProgram $python @($cacheVerifier, '--kind', 'qt-source-archives', '--source-root', $source) 'verify-source-cache'
+if ($env:GITHUB_OUTPUT) { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "legal_archives_verified=true`n", [Text.UTF8Encoding]::new($false)) }
+RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-build-test.ps1'), '-Run', '-Mode', 'dynamic') 'build-and-all-local-tests' 100 @{ GITHUB_SHA = $sourceCommit }
 
 $qt = Ordinary (Join-Path $native '.tools/Qt/6.8.3/mingw_64') $true
 $mingw = Ordinary (Join-Path $native '.tools/Qt/Tools/mingw1310_64') $true

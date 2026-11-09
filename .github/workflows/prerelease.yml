@@ -30,98 +30,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    name: Build ${{ matrix.platform }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.platform == 'windows' && '[{"platform":"windows-x64","os":"windows-2022"}]' || inputs.platform == 'linux' && '[{"platform":"linux-x86_64","os":"ubuntu-22.04"}]' || '[{"platform":"windows-x64","os":"windows-2022"},{"platform":"linux-x86_64","os":"ubuntu-22.04"}]') }}
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'windows' || !inputs.platform)
+    name: Build windows-x64
+    runs-on: windows-2022
     timeout-minutes: 90
     steps:
-      - name: Validate private-source configuration and preview tag
-        shell: pwsh
-        env:
-          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
-          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
-          VERSION_TAG: ${{ inputs.tag }}
-          TEST_SOURCE_REF: ${{ inputs.source_ref }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:VERSION_TAG -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+\z') {
-            throw 'A prerelease tag such as v1.0.0-pre.1 is required.'
-          }
-          if ($env:TEST_SOURCE_REF -and $env:TEST_SOURCE_REF -cnotmatch '\A[0-9a-f]{40}\z') {
-            throw 'A test-only source override must be a full commit SHA.'
-          }
-          if ($env:SOURCE_REPOSITORY -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z' -or
-              [string]::IsNullOrWhiteSpace($env:SOURCE_READ_TOKEN)) {
-            throw 'Configure SOURCE_REPOSITORY and SOURCE_READ_TOKEN in repository Actions secrets.'
-          }
-          foreach ($value in @($env:SOURCE_REPOSITORY) + $env:SOURCE_REPOSITORY.Split('/')) {
-            Write-Output "::add-mask::$value"
-            Write-Output "::add-mask::$($value.ToLowerInvariant())"
-          }
-
       - name: Checkout public packaging tools
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           path: builder
           persist-credentials: false
 
-      - name: Checkout the private release tag
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Prepare private source and verify release inputs
+        uses: ./builder/.github/actions/prepare-source
         with:
-          repository: ${{ secrets.SOURCE_REPOSITORY }}
-          token: ${{ secrets.SOURCE_READ_TOKEN }}
-          ref: ${{ inputs.source_ref || format('refs/tags/{0}', inputs.tag) }}
-          path: source
-          fetch-depth: 1
-          persist-credentials: false
-          show-progress: false
-          submodules: false
-          lfs: false
-
-      - name: Verify test-only override leaves release application inputs unchanged
-        if: inputs.source_ref != ''
-        shell: pwsh
-        env:
-          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
-          VERSION_TAG: ${{ inputs.tag }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $authorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('x-access-token:' + $env:SOURCE_READ_TOKEN))
-          Write-Output "::add-mask::$authorization"
-          $env:GIT_CONFIG_COUNT = '1'
-          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
-          $env:GIT_CONFIG_VALUE_0 = 'AUTHORIZATION: basic ' + $authorization
-          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
-          $tagRef = 'refs/tags/' + $env:VERSION_TAG + ':refs/tags/release-code'
-          & git -C $source fetch --depth=1 --no-tags origin $tagRef
-          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the immutable release code tag.' }
-          $changed = @(& git -C $source diff --name-only refs/tags/release-code HEAD)
-          if ($LASTEXITCODE -ne 0) { throw 'Could not compare the release application inputs.' }
-          $allowed = @('qt-native/scripts/ci-build-test.ps1', 'qt-native/ci/README.md')
-          foreach ($path in $changed) {
-            if (-not $path.StartsWith('qt-native/tests/', [StringComparison]::Ordinal) -and $path -cnotin $allowed) {
-              throw 'A source override may change only the reviewed tests and CI harness files.'
-            }
-          }
-          foreach ($key in @('GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0')) {
-            Remove-Item ('Env:' + $key)
-          }
-          Write-Output 'Release application sources, resources, configuration and toolchain inputs match the immutable tag.'
+          source_repository: ${{ secrets.SOURCE_REPOSITORY }}
+          source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
+          tag: ${{ inputs.tag }}
+          source_ref: ${{ inputs.source_ref }}
 
       - name: Cache verified public Windows toolchain archives
-        if: runner.os == 'Windows'
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: windows-archives
+        continue-on-error: true
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/mcl-ci-archives
           key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
 
+      - name: Restore the four pinned public Qt source archives
+        id: qt-source-archives
+        continue-on-error: true
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            source/qt-native/.tools/downloads/qtbase-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-public-source-archives-${{ hashFiles('source/qt-native/scripts/fetch-qt-license-sources.ps1') }}
+          enableCrossOsArchive: true
+
       - name: Build, test and package Windows privately
-        if: runner.os == 'Windows'
+        id: windows-package
         shell: pwsh
         env:
           VERSION_TAG: ${{ inputs.tag }}
@@ -147,40 +98,162 @@ jobs:
             if (Test-Path $evidence) { Copy-Item $evidence (Join-Path $logs 'ctest') -Recurse }
           }
 
+      - name: Save verified public Windows archives even if later tests fail
+        if: always() && steps.windows-archives.outputs.cache-hit != 'true' && steps.windows-package.outputs.toolchain_verified == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/mcl-ci-archives
+          key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
+
+      - name: Save only the four verified public Qt source archives
+        if: always() && steps.qt-source-archives.outputs.cache-hit != 'true' && steps.windows-package.outputs.legal_archives_verified == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            source/qt-native/.tools/downloads/qtbase-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-public-source-archives-${{ hashFiles('source/qt-native/scripts/fetch-qt-license-sources.ps1') }}
+          enableCrossOsArchive: true
+
+      - name: Encrypt private diagnostics
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          PLATFORM_NAME: windows-x64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-build-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          $out = Join-Path $env:RUNNER_TEMP ('diagnostics-' + $env:PLATFORM_NAME + '.p7m')
+          if (Test-Path builder/.github/scripts/encrypt-diagnostics.py) {
+            python builder/.github/scripts/encrypt-diagnostics.py --certificate builder/.github/scripts/diagnostics-certificate.pem --logs-dir $logs --output $out --exclude-screenshots
+            if ($LASTEXITCODE -ne 0) { throw 'Diagnostics encryption failed; raw files will not be uploaded.' }
+          }
+
+      - name: Retain encrypted diagnostics only
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: encrypted-diagnostics-windows-x64
+          path: ${{ runner.temp }}/diagnostics-windows-x64.p7m
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Retain final runtime package only
+        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-x64
+          path: ${{ runner.temp }}/release-assets/LittleCraftLauncher-${{ inputs.tag }}-windows-x64.*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Retain matching public Qt dependency sources
+        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-qt-dependency-sources
+          path: source/qt-native/.tools/downloads/*-everywhere-src-6.8.3.zip
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  build-linux:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'linux' || !inputs.platform)
+    name: Build linux-x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout public packaging tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Prepare private source and verify release inputs
+        uses: ./builder/.github/actions/prepare-source
+        with:
+          source_repository: ${{ secrets.SOURCE_REPOSITORY }}
+          source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
+          tag: ${{ inputs.tag }}
+          source_ref: ${{ inputs.source_ref }}
+
+      - name: Restore the four pinned public Qt source archives
+        id: qt-source-archives
+        continue-on-error: true
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            source/qt-native/.tools/downloads/qtbase-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-public-source-archives-${{ hashFiles('source/qt-native/scripts/fetch-qt-license-sources.ps1') }}
+          enableCrossOsArchive: true
+
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ninja-build libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
 
       - name: Pin Linux Python
-        if: runner.os == 'Linux'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12.8'
 
       - name: Cache public Linux Qt SDK only
-        if: runner.os == 'Linux'
         id: linux-qt
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        continue-on-error: true
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/qt-linux
           key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v2
 
       - name: Install Linux Qt 6.8.3
-        if: runner.os == 'Linux' && steps.linux-qt.outputs.cache-hit != 'true'
+        if: steps.linux-qt.outputs.cache-hit != 'true'
         run: |
+          # No restore-prefix fallback is used. Retain an unexpected partial
+          # SDK instead of silently mixing it with a fresh installation.
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+          sdk = Path(os.environ['RUNNER_TEMP']) / 'qt-linux'
+          if sdk.exists() and (not sdk.is_dir() or any(sdk.iterdir())):
+              sys.exit('Unexpected partial public SDK retained; installation stopped.')
+          PY
           python -m pip install 'aqtinstall==3.3.0'
           # QtSvg is part of the base Qt 6.8.3 archive set, not an addon module.
           python -m aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats --archives qtbase qtdeclarative qtsvg icu -O "$RUNNER_TEMP/qt-linux"
 
+      - name: Verify public Linux SDK version and required modules
+        run: |
+          python builder/.github/scripts/verify-cache-inputs.py --kind linux-qt-sdk --qt-root "$RUNNER_TEMP/qt-linux/6.8.3/gcc_64"
+
+      - name: Save the public Linux SDK before building private code
+        if: steps.linux-qt.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/qt-linux
+          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v2
+
       - name: Build, test and package Linux privately
-        if: runner.os == 'Linux'
+        id: linux-package
         env:
           VERSION_TAG: ${{ inputs.tag }}
         run: |
           mkdir -p "$RUNNER_TEMP/private-build-logs"
           if ! bash -euo pipefail > "$RUNNER_TEMP/private-build-logs/linux-build.log" 2>&1 <<'BUILD'
+            build_jobs="$(getconf _NPROCESSORS_ONLN)"
+            if test "$build_jobs" -gt 4; then build_jobs=4; fi
             qt_root="$RUNNER_TEMP/qt-linux/6.8.3/gcc_64"
             test "$("$qt_root/bin/qmake" -query QT_VERSION)" = '6.8.3'
             export LD_LIBRARY_PATH="$qt_root/lib"
@@ -190,10 +263,12 @@ jobs:
             # PowerShell must not consume the remaining Bash here-document as
             # pipeline input. Verify the legal inputs before an expensive build.
             pwsh -NoLogo -NoProfile -NonInteractive -File source/qt-native/scripts/fetch-qt-license-sources.ps1 -Run </dev/null
+            python builder/.github/scripts/verify-cache-inputs.py --kind qt-source-archives --source-root "$GITHUB_WORKSPACE/source"
+            echo 'legal_archives_verified=true' >> "$GITHUB_OUTPUT"
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF \
               -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root"
-            cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel 2
+            cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel "$build_jobs"
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
               --build-dir "$RUNNER_TEMP/build-linux" --qt-root "$qt_root" \
               --output-dir "$RUNNER_TEMP/release-assets" --tag "$VERSION_TAG"
@@ -207,7 +282,7 @@ jobs:
             fi
             # The already-packaged application stays in the same build tree.
             # Upload remains gated on every local test passing afterwards.
-            cmake --build "$RUNNER_TEMP/build-linux" --parallel 2
+            cmake --build "$RUNNER_TEMP/build-linux" --parallel "$build_jobs"
             ctest --test-dir "$RUNNER_TEMP/build-linux" --output-on-failure --no-tests=error --parallel 2
           BUILD
           then
@@ -216,53 +291,59 @@ jobs:
           fi
           echo 'Linux build, local tests and extracted-package startup check passed.'
 
+      - name: Save only the four verified public Qt source archives
+        if: always() && steps.qt-source-archives.outputs.cache-hit != 'true' && steps.linux-package.outputs.legal_archives_verified == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            source/qt-native/.tools/downloads/qtbase-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
+            source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-public-source-archives-${{ hashFiles('source/qt-native/scripts/fetch-qt-license-sources.ps1') }}
+          enableCrossOsArchive: true
+
       - name: Encrypt private diagnostics
         if: always()
+        continue-on-error: true
         shell: pwsh
         env:
-          PLATFORM_NAME: ${{ matrix.platform }}
+          PLATFORM_NAME: linux-x86_64
         run: |
           $ErrorActionPreference = 'Stop'
           $logs = Join-Path $env:RUNNER_TEMP 'private-build-logs'
           $null = New-Item -ItemType Directory -Path $logs -Force
           $out = Join-Path $env:RUNNER_TEMP ('diagnostics-' + $env:PLATFORM_NAME + '.p7m')
           if (Test-Path builder/.github/scripts/encrypt-diagnostics.py) {
-            python builder/.github/scripts/encrypt-diagnostics.py --certificate builder/.github/scripts/diagnostics-certificate.pem --logs-dir $logs --output $out
+            python builder/.github/scripts/encrypt-diagnostics.py --certificate builder/.github/scripts/diagnostics-certificate.pem --logs-dir $logs --output $out --exclude-screenshots
             if ($LASTEXITCODE -ne 0) { throw 'Diagnostics encryption failed; raw files will not be uploaded.' }
           }
 
       - name: Retain encrypted diagnostics only
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: encrypted-diagnostics-${{ matrix.platform }}
-          path: ${{ runner.temp }}/diagnostics-${{ matrix.platform }}.p7m
+          name: encrypted-diagnostics-linux-x86_64
+          path: ${{ runner.temp }}/diagnostics-linux-x86_64.p7m
           if-no-files-found: ignore
           retention-days: 3
 
       - name: Retain final runtime package only
+        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-${{ matrix.platform }}
-          path: ${{ runner.temp }}/release-assets/LittleCraftLauncher-${{ inputs.tag }}-${{ matrix.platform }}.*
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
-
-      - name: Retain matching public Qt dependency sources
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-qt-dependency-sources
-          path: source/qt-native/.tools/downloads/*-everywhere-src-6.8.3.zip
+          name: release-linux-x86_64
+          path: ${{ runner.temp }}/release-assets/LittleCraftLauncher-${{ inputs.tag }}-linux-x86_64.*
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
 
   publish:
     name: Publish both platforms as a prerelease
-    needs: build
-    if: inputs.platform == 'both' || !inputs.platform
+    needs: [build-windows, build-linux]
+    if: always() && (inputs.platform == 'both' || !inputs.platform) && needs.build-windows.result == 'success' && needs.build-linux.result == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
