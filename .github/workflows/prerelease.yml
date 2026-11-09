@@ -144,17 +144,22 @@ jobs:
             export QT_PLUGIN_PATH="$qt_root/plugins"
             export QML_IMPORT_PATH="$qt_root/qml"
             export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QML_DISABLE_DISK_CACHE=1
+            # PowerShell must not consume the remaining Bash here-document as
+            # pipeline input. Verify the legal inputs before an expensive build.
+            pwsh -NoLogo -NoProfile -NonInteractive -File source/qt-native/scripts/fetch-qt-license-sources.ps1 -Run </dev/null
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF \
               -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root"
-            cmake --build "$RUNNER_TEMP/build-linux" --parallel 2
-            ctest --test-dir "$RUNNER_TEMP/build-linux" --output-on-failure --no-tests=error --parallel 2
-            pwsh -NoLogo -NoProfile -NonInteractive -File source/qt-native/scripts/fetch-qt-license-sources.ps1 -Run
+            cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel 2
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
               --build-dir "$RUNNER_TEMP/build-linux" --qt-root "$qt_root" \
               --output-dir "$RUNNER_TEMP/release-assets" --tag "$VERSION_TAG"
             python builder/.github/scripts/smoke-linux.py \
               --archive "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"
+            # The already-packaged application stays in the same build tree.
+            # Upload remains gated on every local test passing afterwards.
+            cmake --build "$RUNNER_TEMP/build-linux" --parallel 2
+            ctest --test-dir "$RUNNER_TEMP/build-linux" --output-on-failure --no-tests=error --parallel 2
           BUILD
           then
             echo '::error::Linux packaging failed. Raw diagnostics are not public; encrypted diagnostics are retained.'
