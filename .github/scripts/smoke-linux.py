@@ -32,6 +32,14 @@ def main():
         environment["LD_LIBRARY_PATH"] = str(app / "lib")
         environment["QT_QUICK_BACKEND"] = "software"
         environment["QML_DISABLE_DISK_CACHE"] = "1"
+        dependencies = subprocess.run(
+            ["ldd", str(app / "plugins/platforms/libqxcb.so")], env=environment,
+            capture_output=True, text=True, timeout=30,
+        )
+        missing = [line.strip() for line in dependencies.stdout.splitlines() if "not found" in line]
+        if dependencies.returncode != 0 or missing:
+            raise RuntimeError("Packaged XCB runtime dependencies are unavailable:\n"
+                               + "\n".join(missing) + dependencies.stderr)
         # A fresh state root is outside the runtime tree and never rearchived.
         state = root / "user-state"
         cli = subprocess.run(

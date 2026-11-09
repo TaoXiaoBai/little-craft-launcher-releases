@@ -151,7 +151,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ninja-build libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxrender1 libdbus-1-3 libssl3 xvfb xauth
+          sudo apt-get install -y --no-install-recommends ninja-build libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
 
       - name: Pin Linux Python
         if: runner.os == 'Linux'
