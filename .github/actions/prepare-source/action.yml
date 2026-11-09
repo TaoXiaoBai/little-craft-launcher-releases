@@ -72,18 +72,24 @@ runs:
         $changed = @(& git -C $source diff --no-renames --name-only refs/tags/release-code HEAD)
         if ($LASTEXITCODE -ne 0) { throw 'Could not compare the release application inputs.' }
         $allowed = @('qt-native/scripts/ci-build-test.ps1', 'qt-native/ci/README.md')
-        $reviewedTestBudgetChanged = $false
+        $reviewedTestConfigurationChanged = $false
         foreach ($path in $changed) {
           if ($path -ceq 'qt-native/CMakeLists.txt') {
             $tagCMakeBlob = & git -C $source rev-parse --verify 'refs/tags/release-code:qt-native/CMakeLists.txt'
             if ($LASTEXITCODE -ne 0) { throw 'Could not verify the tagged CMake input.' }
             $overrideCMakeBlob = & git -C $source rev-parse --verify 'HEAD:qt-native/CMakeLists.txt'
             if ($LASTEXITCODE -ne 0) { throw 'Could not verify the override CMake input.' }
+            # Only the complete reviewed test-budget/cache configurations may
+            # replace this exact tagged file; other CMake edits remain denied.
+            $reviewedCMakeBlobs = @(
+              '66de044c9a73f460e73a0bc6242d1ae933274285'
+              '329db8b7fa6e1e6330521a9167acbcef1701479b'
+            )
             if ($tagCMakeBlob -cne 'ee81cbf243ea2b975352aac06e3455c34a10211f' -or
-                $overrideCMakeBlob -cne '66de044c9a73f460e73a0bc6242d1ae933274285') {
-              throw 'A CMake override must match the exact reviewed UI-test timeout change.'
+                $overrideCMakeBlob -cnotin $reviewedCMakeBlobs) {
+              throw 'A CMake override must match an exact reviewed test-budget or cache configuration.'
             }
-            $reviewedTestBudgetChanged = $true
+            $reviewedTestConfigurationChanged = $true
             continue
           }
           if (-not $path.StartsWith('qt-native/tests/', [StringComparison]::Ordinal) -and $path -cnotin $allowed) {
@@ -93,8 +99,8 @@ runs:
         foreach ($key in @('GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0')) {
           Remove-Item ('Env:' + $key)
         }
-        if ($reviewedTestBudgetChanged) {
-          Write-Output 'Release application sources, resources and toolchain inputs match the immutable tag; the only configuration exception is the exact reviewed CMake UI-test timeout change.'
+        if ($reviewedTestConfigurationChanged) {
+          Write-Output 'Release application sources, resources and toolchain inputs match the immutable tag; the only configuration exception is an exact reviewed CMake test-budget or cache configuration.'
         } else {
           Write-Output 'Release application sources, resources, configuration and toolchain inputs match the immutable tag.'
         }
