@@ -1,5 +1,5 @@
 name: Windows and Linux prerelease
-run-name: Prerelease ${{ inputs.tag }} (Windows + Linux)
+run-name: Prerelease ${{ inputs.tag }} (${{ inputs.platform || 'both' }})
 
 on:
   workflow_dispatch:
@@ -8,12 +8,21 @@ on:
         description: 'Existing private source tag, for example v1.0.0-pre.1'
         required: true
         type: string
+      platform:
+        description: 'both builds and publishes; a single platform only retains its verified package'
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - windows
+          - linux
 
 permissions:
   contents: read
 
 concurrency:
-  group: launcher-prerelease
+  group: launcher-prerelease-${{ inputs.tag }}-${{ inputs.platform || 'both' }}
   cancel-in-progress: false
 
 jobs:
@@ -23,11 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: windows-x64
-            os: windows-2022
-          - platform: linux-x86_64
-            os: ubuntu-22.04
+        include: ${{ fromJSON(inputs.platform == 'windows' && '[{"platform":"windows-x64","os":"windows-2022"}]' || inputs.platform == 'linux' && '[{"platform":"linux-x86_64","os":"ubuntu-22.04"}]' || '[{"platform":"windows-x64","os":"windows-2022"},{"platform":"linux-x86_64","os":"ubuntu-22.04"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -213,6 +218,7 @@ jobs:
   publish:
     name: Publish both platforms as a prerelease
     needs: build
+    if: inputs.platform == 'both' || !inputs.platform
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:

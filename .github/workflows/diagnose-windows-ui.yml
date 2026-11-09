@@ -1,0 +1,107 @@
+name: Diagnose private Windows UI
+run-name: Diagnose native UI ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing private prerelease source tag'
+        required: true
+        type: string
+        default: v1.0.0-pre.2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diagnose-windows-ui
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Validate configuration and private source tag
+        shell: pwsh
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:VERSION_TAG -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+\z') {
+            throw 'An existing prerelease source tag is required.'
+          }
+          if ($env:SOURCE_REPOSITORY -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\z' -or
+              [string]::IsNullOrWhiteSpace($env:SOURCE_READ_TOKEN)) {
+            throw 'Configure SOURCE_REPOSITORY and SOURCE_READ_TOKEN as Actions secrets.'
+          }
+          foreach ($value in @($env:SOURCE_REPOSITORY) + $env:SOURCE_REPOSITORY.Split('/')) {
+            Write-Output "::add-mask::$value"
+            Write-Output "::add-mask::$($value.ToLowerInvariant())"
+          }
+
+      - name: Checkout public diagnostic tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Checkout the private source tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_READ_TOKEN }}
+          ref: refs/tags/${{ inputs.tag }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+          submodules: false
+          lfs: false
+
+      - name: Cache verified public Windows toolchain archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/mcl-ci-archives
+          key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
+
+      - name: Build only native UI and collect private QtTest text output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-native-ui-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          & pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/diagnose-windows-ui.ps1 `
+            -SourceRoot (Join-Path $env:GITHUB_WORKSPACE 'source') `
+            -PrivateLogDirectory $logs *> (Join-Path $logs 'orchestrator.log')
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error -ErrorAction Continue 'Windows UI diagnostic failed. Detailed text logs remain private and are retained encrypted.'
+            exit 1
+          }
+          Write-Output 'The diagnostic native UI suite completed; this run does not publish binaries.'
+
+      - name: Encrypt diagnostic output
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-native-ui-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          if (Test-Path builder/.github/scripts/encrypt-diagnostics.py) {
+            python builder/.github/scripts/encrypt-diagnostics.py `
+              --certificate builder/.github/scripts/diagnostics-certificate.pem `
+              --logs-dir $logs --output (Join-Path $env:RUNNER_TEMP 'native-ui-diagnostics.p7m')
+            if ($LASTEXITCODE -ne 0) { throw 'Diagnostic encryption failed. No raw files will be uploaded.' }
+          }
+
+      - name: Retain encrypted diagnostic only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: encrypted-native-ui-diagnostics
+          path: ${{ runner.temp }}/native-ui-diagnostics.p7m
+          if-no-files-found: ignore
+          retention-days: 3

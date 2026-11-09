@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import traceback
 import zipfile
 
 
@@ -74,7 +75,8 @@ def require_elf(path: Path) -> None:
 
 
 def copy_runtime(qt_root: Path, stage: Path) -> None:
-    version = ordinary_file(qt_root / "lib/cmake/Qt6Core/Qt6CoreConfigVersion.cmake").read_text(encoding="utf-8")
+    # The public ConfigVersion.cmake delegates to this generated version file.
+    version = ordinary_file(qt_root / "lib/cmake/Qt6Core/Qt6CoreConfigVersionImpl.cmake").read_text(encoding="utf-8")
     require(re.search(r'set\(PACKAGE_VERSION\s+"?6\.8\.3"?\s*\)', version) is not None,
             "The Qt SDK version is not 6.8.3.")
     libraries = sorted(path for path in (qt_root / "lib").iterdir() if LIBRARY_NAME.fullmatch(path.name))
@@ -127,7 +129,10 @@ def copy_legal_material(source_root: Path, stage: Path) -> None:
         require(any(path.is_file() for path in license_dir.iterdir()), "Qt license texts are empty.")
         # Keep exact licenses referenced by attribution, even with unusual names.
         for attribution in sorted(path for path in selected if path.name == "qt_attribution.json"):
-            entries = json.loads(attribution.read_text(encoding="utf-8-sig"))
+            # Official 6.8.3 records include literal tabs/newlines in copyright
+            # strings. Match the acquisition script's permissive string reader;
+            # archive the original bytes and still validate every referenced path.
+            entries = json.loads(attribution.read_text(encoding="utf-8-sig"), strict=False)
             if isinstance(entries, dict):
                 entries = [entries]
             require(isinstance(entries, list), "A Qt attribution record has an unexpected format.")
@@ -309,8 +314,9 @@ def main() -> int:
     try:
         archive = package(args)
     except Exception:
-        # Paths/compiler diagnostics can identify the private checkout. The public
-        # workflow needs only a failure status, never source/build input details.
+        # The workflow captures this entire process into encrypted private logs.
+        # Retain the cause there; the public step emits only a fixed status.
+        traceback.print_exc()
         print("Linux runtime packaging failed; no release asset should be published.", file=os.sys.stderr)
         return 1
     print(f"Packaged {archive.name}")
