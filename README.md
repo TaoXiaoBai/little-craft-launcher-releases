@@ -12,51 +12,61 @@ A native Minecraft Java Edition launcher for Windows, with separate instances fo
 
 [Downloads and release notes](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) · [Accounts and data](#accounts-and-data) · [Report an issue](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues)
 
-Windows 10/11 x64 · Eleven themes · Qt Quick
+Windows 10/11 x64 · Twelve themes · Qt 6.8 / C++20 / QML
 
 </div>
 
-> **1.0.0 is in preparation. No official installation package has been published in this repository yet.** This page introduces the development version. The interface is still being upgraded; supported features and installation instructions will be recorded with each release.
+![Launchpad development preview](assets/launchpad-home.png)
 
-## Make room for every playthrough
-
-| What you need | What the launcher provides |
-| --- | --- |
-| Separate setups | Create, copy and import instances with their own game version, Java, memory and launch settings. Export modpacks when you need to share a setup. |
-| Compatible content | Browse mods, resource packs and modpacks; review dependencies, changes and the target instance before installing. |
-| Favorite mods, reused | Save Modrinth projects and find compatible versions for another instance, rather than copying old JARs. |
-| Worlds you can return to | Back up and export worlds, then preview an import or restore before applying it. |
-| Useful feedback | Inspect tasks and logs, export diagnostics and review memory risks before launching. A memory advisory is not a game-compatibility or FPS verdict. |
-| A familiar workspace | Eleven themes share the same pages and controls, with alternative navigation layouts and a reduced-motion setting. |
-
-**Loader scope:** Vanilla, Fabric and Quilt have installation paths. The native Forge installer currently targets Minecraft **1.20.1**, and NeoForge **1.21.1**. Check the available combinations in the app; other versions are not implied to work.
-
-**Modpacks:** Modrinth packs can be previewed and installed into new instances. CurseForge uses an authorized API key for the current session; its catalog does not currently create new modpack instances directly. Local pack import is available.
-
-## Choose your surroundings
-
-Forest Light, Classic Dark, Graphite, Ore, Sand, Windows 11, Material 3, WinUI × MD3, Material 3 Expressive, **Koring Glass (`Koring · 轻玻璃`)** and **Lumina (`留白 · Lumina`)** use the same Qt Quick application. The lantern keeps its original colors across themes.
-
-Choose a theme under **Settings → Appearance**. Koring Glass provides a top navigation capsule and page-specific sidebars. Lumina combines white space, serif headings and horizontal navigation; its Home pairs the current instance and launch action with a useful summary, then stacks into a scrollable layout in smaller windows.
-
-![Lumina development preview](assets/lumina-home.png)
-
-<details>
-<summary>View the compact-window preview</summary>
-
-![Lumina in a compact development window](assets/lumina-home-small.png)
-
-</details>
-
-These are real Qt development windows using synthetic demonstration data, captured on Linux with software rendering. The previews use Simplified Chinese. They are not Windows acceptance evidence or screenshots of a released build. [Image provenance and design reference](assets/README.md).
+> [!NOTE]
+> **1.0.0 is in preparation. This repository has no official installation package yet.** This page introduces the development version. Downloadable builds, their supported features and installation instructions will appear in [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases).
+>
+> Interface previews use Simplified Chinese. The screenshots show development windows, not a released Windows build.
 
 ## Start playing after release
 
-1. **Get a released build.** Use [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and verify the SHA-256. Follow that version's instructions for installing or extracting the complete package.
-2. **Set up your account and Java.** Review the data location and select or detect a compatible Java runtime. Microsoft sign-in availability depends on the project's registration and service-access configuration described below.
-3. **Create or import an instance.** Choose a game version and loader, prepare the game files, then launch from Home. Back up worlds before changing versions or modpacks.
+1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. A static EXE runs as it is; extract a dynamic package in full.
+2. **Add an account and choose Java.** Which account types you can use depends on your region; see [Accounts and data](#accounts-and-data).
+3. **Create or import an instance.** Pick a game version and loader, wait for the game files, then launch from Home. Back up your worlds before changing versions or modpacks.
 
-The launcher does not bundle Minecraft, Java or account credentials. Release notes will identify the package format, requirements and version-matched supporting materials.
+Minecraft, Java and account credentials are not bundled.
+
+## What it does
+
+| What you need | What the launcher provides |
+| --- | --- |
+| Separate setups | Create, copy and import instances, each with its own game version, Java, memory and launch settings. Export a modpack when you want to share one. |
+| Compatible content | Browse mods, resource packs and modpacks; review dependencies, changes and the target instance before installing. |
+| Favourite mods, reused | Save Modrinth projects and find compatible versions for another instance, instead of copying old JARs. |
+| Worlds you can return to | Back up and export worlds, and preview an import or restore before applying it. |
+| Useful feedback | Inspect tasks, logs and diagnostics, and review memory risks before launching. A memory advisory is not a compatibility or FPS verdict. |
+
+Current scope:
+
+- **Loaders**: Vanilla, Fabric and Quilt install directly. The native Forge installer currently targets Minecraft **1.20.1** only, and NeoForge **1.21.1** only. Other combinations are limited to what the app offers, with no compatibility promise.
+- **Modpacks**: Modrinth packs can be previewed and installed as new instances. CurseForge needs an authorized API key for the current session, and its catalogue cannot create a modpack instance directly yet; local pack import works instead.
+
+## Appearance
+
+All twelve themes share the same pages and controls. Choose under **Settings → Appearance** when no game, sign-in or file operation is active; every theme supports reduced motion, and the lantern keeps its colours throughout. New installs start on Launchpad; existing data keeps its theme.
+
+| Theme | What it looks like |
+| --- | --- |
+| **Launchpad** (`启动台`, default) | A narrow icon rail; Home opens with a "continue playing" card that holds the launch button, the instance switcher and anything blocking launch. Eight accent presets or any colour, in light, dark or system mode. |
+| **Windows 11** | Rebuilt to Fluent: a Mica-style shell, a rounded content layer, Fluent controls, and Windows-style settings groups (the header on the page, the settings on a card). |
+| **Material 3**, **Material 3 Expressive** | A navigation rail with a FAB; M3 switches, sliders, progress bars and tabs; Settings laid out as list sections. |
+| **WinUI × MD3** | WinUI's structure with MD3's components and colours. |
+| **Koring Glass** (`Koring · 轻玻璃`) | Koring's original wallpaper and centred top navigation; the launch capsule appears when you hover near the bottom of Home. |
+| **Lumina** (`留白 · Lumina`) | Generous white space, serif headings and a quiet horizontal navigation; small windows switch to a scrolling column. |
+| Legacy | Forest Light, Classic Dark, Graphite, Ore and Sand, folded away by default in the appearance settings. |
+
+| Windows 11 | Material 3 |
+| --- | --- |
+| ![Windows 11 theme home](assets/winui3-fluent-home.png) | ![Material 3 theme home](assets/material3-home.png) |
+| **Koring Glass** | **Lumina** |
+| ![Koring Glass theme home](assets/koring-home-idle.png) | ![Lumina theme home](assets/lumina-home.png) |
+
+These are real Qt development windows captured on Linux with software rendering and demonstration data. They do not establish Windows acceptance, real-account sign-in, game launch or frame rate. [Screenshot provenance and artwork credits](assets/README.md).
 
 ## Accounts and data
 
@@ -68,13 +78,21 @@ The Microsoft sign-in implementation opens the system browser and uses the OAuth
 
 ### Account availability
 
-Only a fresh, valid mainland China (`CN`) region detection permits explicitly trusted external authentication or limited local identities. Other regions, including `HK`, `MO` and `TW`, and unknown or expired detection require Microsoft authentication and Minecraft ownership verification. Missing Microsoft configuration blocks that sign-in flow.
+| Region detection | Available accounts |
+| --- | --- |
+| Mainland China (`CN`, while the result is still valid) | Microsoft; LittleSkin or another external authentication service you explicitly trust; a local offline identity |
+| Any other country or region (including `HK`, `MO` and `TW`) | Official Microsoft accounts only, with Minecraft ownership verified |
+| Not yet detected, detecting, failed or expired | Official Microsoft accounts only, with Minecraft ownership verified |
+
+Without Microsoft configuration, that sign-in flow is unavailable, so no account can be added where Microsoft is required.
 
 LittleSkin is an address suggestion, not automatic trust. External authentication sends that service's credentials only after the user explicitly trusts the selected service. **Do not enter a Microsoft password into an external-authentication form.** External or local identities do not establish Minecraft ownership or grant access to official online services.
 
 ### Local data
 
-New installations use per-user local application data. An existing `mclauncher-qt-data` beside the EXE remains in use; `--portable` explicitly selects that directory, and `--data-root` takes precedence with an absolute path. Data does not migrate automatically. Close the game and launcher before backing up or moving the entire directory.
+- New installs use per-user local application data; an existing `mclauncher-qt-data` beside the EXE stays in use.
+- `--portable` uses the portable directory beside the EXE; `--data-root` sets an absolute path and takes precedence.
+- Data never moves between locations on its own. Close the game and launcher before backing up or moving the whole directory.
 
 ## Feedback and project information
 
