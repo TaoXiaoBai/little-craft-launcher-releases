@@ -19,7 +19,7 @@ Windows 10/11 x64 · Linux x86_64 · 十二套主题 + 一套测试主题 · Qt 
 ![启动台开发版界面预览](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 现处于预发布测试阶段，尚无正式版。** pre.5 更新补齐 Linux 游戏启动、Java 管理和系统密钥环凭据保存，Linux 提供单个 AppImage，Windows 提供 ZIP。请从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载可用版本，并阅读对应的安装说明与账号要求。
+> **1.0.0 现处于预发布测试阶段，尚无正式版。** pre.6 更新补齐 Linux 游戏启动、Java 管理和系统密钥环凭据保存，Linux 提供单个 AppImage，Windows 提供 ZIP。请从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载可用版本，并阅读对应的安装说明与账号要求。
 >
 > 预览界面使用简体中文。截图来自开发窗口，不是已发布的 Windows 版本。
 
@@ -33,7 +33,7 @@ Windows 10/11 x64 · Linux x86_64 · 十二套主题 + 一套测试主题 · Qt 
 
 ### Linux AppImage
 
-pre.5 AppImage 面向 Ubuntu 22.04 或更新版本的 x86_64 系统，支持 X11/XWayland 和 Wayland。下载后赋予执行权限即可运行。没有 FUSE 时，可执行 `./LittleCraftLauncher-<版本>-linux-x86_64.AppImage --appimage-extract`，再运行 `./squashfs-root/AppRun`。包内附带 Qt，显卡驱动和桌面服务由系统提供。
+pre.6 AppImage 面向 Ubuntu 22.04 或更新版本的 x86_64 系统，支持 X11/XWayland 和 Wayland。下载后赋予执行权限即可运行。没有 FUSE 时，可执行 `./LittleCraftLauncher-<版本>-linux-x86_64.AppImage --appimage-extract`，再运行 `./squashfs-root/AppRun`。包内附带 Qt，显卡驱动和桌面服务由系统提供。
 
 Linux 支持游戏启动，以及官方运行时 Java 8/17/21/25 的下载管理，也可选择与游戏版本匹配的本机 Java。在线凭据保存需要可用的系统密钥环，见下文[账号与数据](#账号与数据)。
 

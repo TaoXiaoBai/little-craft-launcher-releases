@@ -25,6 +25,10 @@ TOOL_NAMES = ("linuxdeploy-x86_64.AppImage", "linuxdeploy-plugin-qt-x86_64.AppIm
 PLATFORM_PLUGINS = ("libqxcb.so", "libqwayland-generic.so", "libqwayland-egl.so")
 LIBRARY_NAME = re.compile(r"lib[^/]+\.so(?:\.[0-9]+)*\Z")
 LEGAL_NAME = re.compile(r"(^|[._-])(license|copying|notice|copyright|authors|ftl|ofl)([._-]|$)", re.I)
+# The pinned Qt 6.8.3 archives also contain license_*.js test programs and
+# license-check Python/YAML files. Name-based discovery selects documents only;
+# LICENSES and explicit attribution references are handled independently below.
+LEGAL_DOCUMENT_SUFFIXES = frozenset({"", ".txt", ".md", ".chromium"})
 PLUGIN_GROUPS = (
     "imageformats", "iconengines", "platformthemes", "platforminputcontexts", "tls",
     "networkinformation", "xcbglintegrations",
@@ -141,7 +145,8 @@ def copy_legal_material(source_root: Path, stage: Path) -> None:
             if not path.is_file():
                 continue
             relative = path.relative_to(module_root)
-            if relative.parts[0] == "LICENSES" or path.name == "qt_attribution.json" or LEGAL_NAME.search(path.name):
+            if (relative.parts[0] == "LICENSES" or path.name == "qt_attribution.json"
+                    or (LEGAL_NAME.search(path.name) and path.suffix.lower() in LEGAL_DOCUMENT_SUFFIXES)):
                 selected.add(path)
         require(any(path.is_file() for path in license_dir.iterdir()), "Qt license texts are empty.")
         # Keep exact licenses referenced by attribution, even with unusual names.
@@ -314,11 +319,12 @@ def validate_stage(stage: Path, qt_root: Path | None = None) -> None:
         # The scanner sees the private application's source directory but must
         # never deploy it. Only unchanged Qt SDK QML/JS sources may be packaged.
         if path.is_file() and (path.suffix.lower() in {".qml", ".js", ".mjs"} or path.name == "qmldir"):
+            label = repr(relative.as_posix()[:512])
             require(relative.is_relative_to("usr/qml") and qt_root is not None,
-                    "Application QML sources must not enter the runtime package.")
+                    "Application QML sources must not enter the runtime package: " + label)
             sdk_file = qt_root / "qml" / relative.relative_to("usr/qml")
             require(sdk_file.is_file() and sdk_file.read_bytes() == path.read_bytes(),
-                    "A deployed QML source does not match the selected Qt SDK.")
+                    "A deployed QML source does not match the selected Qt SDK: " + label)
 
 
 def deployment_environment(qt_root: Path, tool_dir: Path, source_root: Path) -> dict[str, str]:
