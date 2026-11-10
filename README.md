@@ -19,7 +19,7 @@ Windows 10/11 x64 · Linux x86_64 · Twelve themes + one experimental theme · Q
 ![Launchpad development preview](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 is in prerelease testing.** The pre.5 update adds Linux game launch, managed Java and system-keyring credential storage, with a single AppImage for Linux and a ZIP for Windows. Download available builds from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) and read their installation and account requirements. There is no stable release yet.
+> **1.0.0 is in prerelease testing.** The pre.6 update adds Linux game launch, managed Java and system-keyring credential storage, with a single AppImage for Linux and a ZIP for Windows. Download available builds from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) and read their installation and account requirements. There is no stable release yet.
 >
 > Interface previews use Simplified Chinese. The screenshots show development windows, not a released Windows build.
 
@@ -33,7 +33,7 @@ Minecraft, Java and account credentials are not bundled.
 
 ### Linux AppImage
 
-The pre.5 AppImage targets Ubuntu 22.04 or newer on x86_64, with X11/XWayland or Wayland. Make the downloaded file executable and run it. Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. Qt is bundled; graphics drivers and desktop services come from the system.
+The pre.6 AppImage targets Ubuntu 22.04 or newer on x86_64, with X11/XWayland or Wayland. Make the downloaded file executable and run it. Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. Qt is bundled; graphics drivers and desktop services come from the system.
 
 Linux supports game launch and downloads of the official Java 8/17/21/25 runtimes. You can also select a locally installed Java that matches the game version. Saving online credentials requires an available system keyring; see [Accounts and data](#accounts-and-data).
 

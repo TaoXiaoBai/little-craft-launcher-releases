@@ -188,6 +188,38 @@ class PackageLinuxTests(unittest.TestCase):
                 self.assertTrue((stage / "usr/plugins/platforms" / name).is_file())
             self.assertTrue((stage / "usr/plugins/imageformats/libqwebp.so").is_file())
 
+    def test_legal_name_discovery_collects_documents_not_upstream_test_programs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = Fixture(root)
+            sources = fixture.source / "qt-native/.tools/Qt/6.8.3/Src"
+            lint = "tests/auto/qml/ecmascripttests/test262/tools/lint"
+            programs = [("qtdeclarative", f"{lint}/test/fixtures/{name}.js") for name in (
+                "license_alternate_1", "license_alternate_2", "license_alternate_3", "license_alternate_5",
+                "license_generated", "license_invalid_year", "license_missing")]
+            programs += [("qtdeclarative", f"{lint}/lib/checks/license.py"),
+                         ("qtbase", "coin/instructions/prepare_license_test.yaml"),
+                         ("qtbase", "coin/instructions/run_license_check.yaml")]
+            for module, name in programs:
+                put(sources / module / name, b"upstream executable test fixture, not a license document")
+            documents = ("LICENSE", "LICENSE.txt", "AUTHORS.md", "LICENSE.chromium")
+            for name in documents:
+                put(sources / "qtdeclarative/third-party" / name, b"legal document")
+            # Exact upstream attribution references need not use a conventional
+            # document suffix, and must retain their ordinary-file/path checks.
+            put(sources / "qtdeclarative/third-party/terms.custom", b"referenced license text")
+            put(sources / "qtdeclarative/third-party/qt_attribution.json",
+                json.dumps({"LicenseFile": "terms.custom"}).encode())
+            stage = root / "stage"
+            stage.mkdir()
+            PACKAGE.copy_legal_material(fixture.source, stage)
+            for module, name in programs:
+                self.assertFalse((stage / "licenses/Qt" / module / name).exists(), name)
+            for name in (*documents, "terms.custom", "qt_attribution.json"):
+                self.assertTrue((stage / "licenses/Qt/qtdeclarative/third-party" / name).is_file(), name)
+            self.assertTrue((stage / "licenses/Qt/qtdeclarative/LICENSES/LGPL-3.0-only.txt").is_file())
+            PACKAGE.validate_stage(stage, fixture.qt)
+
     def test_pinned_tool_failure_precedes_all_external_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(Path(directory))
@@ -273,6 +305,12 @@ class PackageLinuxTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "selected Qt SDK"):
                 PACKAGE.validate_stage(stage, fixture.qt)
             private.unlink()
+            outside = put(stage / "unexpected/Main.qml", b"PRIVATE_APPLICATION_QML_FIXTURE_DO_NOT_PACKAGE")
+            with self.assertRaisesRegex(ValueError, "Application QML sources") as error:
+                PACKAGE.validate_stage(stage, fixture.qt)
+            self.assertIn("unexpected/Main.qml", str(error.exception))
+            self.assertNotIn(str(stage), str(error.exception))
+            outside.unlink()
             source = put(stage / "launcher.cpp", b"PRIVATE_APPLICATION_QML_FIXTURE_DO_NOT_PACKAGE")
             with self.assertRaisesRegex(ValueError, "forbidden source"):
                 PACKAGE.validate_stage(stage, fixture.qt)
