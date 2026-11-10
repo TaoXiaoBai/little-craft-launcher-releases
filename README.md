@@ -110,6 +110,8 @@ Linux saves online credentials through the desktop's Secret Service keyring, suc
 
 Maintained by [TaoXiaoBai](https://github.com/TaoXiaoBai). This repository is the public home for project information, releases and [issue reports](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues).
 
+Launcher QQ community: **827507229**.
+
 When reporting a problem, include the launcher version, operating system, reproduction steps, expected and actual behavior, and only the relevant redacted logs. Review logs before sharing them. Keep passwords, access tokens, account databases and private worlds out of public reports.
 
 ## Source and licensing

@@ -110,6 +110,8 @@ Linux 通过桌面的 Secret Service 密钥环保存在线凭据，例如 GNOME 
 
 项目由 [TaoXiaoBai](https://github.com/TaoXiaoBai) 维护。本仓库是公开的项目介绍、版本发布和[问题反馈](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues)入口。
 
+启动器 QQ 交流群：**827507229**。
+
 反馈时请附启动器版本、操作系统、复现步骤、预期与实际行为，以及相关的脱敏日志。分享前请自行检查日志；不要公开密码、访问令牌、账号库或私人存档。
 
 ## 源码与许可
