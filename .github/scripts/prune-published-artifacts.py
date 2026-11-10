@@ -8,15 +8,13 @@ import re
 import subprocess
 import sys
 
+from release_support import verify_published_assets
+
 
 ARTIFACT_PLATFORMS = {
     "release-windows-x64": "windows-x64",
     "release-linux-x86_64": "linux-x86_64",
     "release-qt-dependency-sources": "windows-x64",
-}
-QT_SOURCE_ASSETS = {
-    f"{module}-everywhere-src-6.8.3.zip"
-    for module in ("qtbase", "qtdeclarative", "qtsvg", "qtimageformats")
 }
 
 
@@ -71,17 +69,7 @@ def prune(repository, tag, run_ids, api=github_api, dry_run=False):
         raise ValueError("A public prerelease is required")
     release_id = positive_id(release.get("id"))
     assets = paginated(api, f"{prefix}/releases/{release_id}/assets")
-    expected = {
-        f"LittleCraftLauncher-{tag}-windows-x64.zip",
-        f"LittleCraftLauncher-{tag}-linux-x86_64.tar.gz",
-        "SHA256SUMS.txt", *QT_SOURCE_ASSETS,
-    }
-    if (len(assets) != 7 or {asset.get("name") for asset in assets} != expected
-            or any(asset.get("state") != "uploaded"
-                   or not isinstance(asset.get("size"), int)
-                   or isinstance(asset.get("size"), bool) or asset["size"] <= 0
-                   for asset in assets)):
-        raise ValueError("The published prerelease is incomplete")
+    verify_published_assets(tag, assets, release.get("body", ""))
 
     # Validate every supplied run before deleting anything. Overall run status
     # may still be in_progress while its successful build jobs are publishing.

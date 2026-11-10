@@ -126,115 +126,23 @@ jobs:
           github-token: ${{ github.token }}
           path: release-assets
 
-      - name: Verify package identities and all six assets
-        env:
-          VERSION_TAG: ${{ inputs.tag }}
-        run: |
-          python3 <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path, PurePosixPath
-          import re
-          import tarfile
-          import zipfile
+      - name: Checkout public release tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: release-tools
+          persist-credentials: false
 
-          tag = os.environ['VERSION_TAG']
-          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+', tag):
-              raise RuntimeError('Invalid prerelease tag.')
-          root = Path('release-assets')
-          windows = f'LittleCraftLauncher-{tag}-windows-x64.zip'
-          linux = f'LittleCraftLauncher-{tag}-linux-x86_64.tar.gz'
-          sources = {
-              'qtbase-everywhere-src-6.8.3.zip': (74010483, '992bf7766e214a341ef793eb3665fb784787d2fd666955f5f507f4c6f1f770dd'),
-              'qtdeclarative-everywhere-src-6.8.3.zip': (83650162, '3ba85e9807958bd61606ce72af189be312396030b9946ca79d9e38347306d88e'),
-              'qtsvg-everywhere-src-6.8.3.zip': (2651981, '90643c1ba05245abedc2bcd9d4f745568dc27a1b37dd3ba861fd19d8ac6a7c46'),
-              'qtimageformats-everywhere-src-6.8.3.zip': (2999913, '30b81e4f641cdbd608ae8c01a48677338d1c69545117c5552063b63262c7eb1b'),
-          }
-          expected = {windows, linux, *sources}
-          entries = list(root.iterdir())
-          if {path.name for path in entries} != expected or any(path.is_symlink() or not path.is_file() or path.stat().st_size == 0 for path in entries):
-              raise RuntimeError('Release assets must be exactly two runtime packages and four Qt source archives.')
-          for name, (length, checksum) in sources.items():
-              path = root / name
-              digest = hashlib.sha256()
-              with path.open('rb') as source:
-                  for block in iter(lambda: source.read(1024 * 1024), b''):
-                      digest.update(block)
-              if path.stat().st_size != length or digest.hexdigest() != checksum:
-                  raise RuntimeError('A Qt dependency archive does not match its pinned upstream bytes.')
-
-          def safe_path(name):
-              value = PurePosixPath(name)
-              if value.is_absolute() or '..' in value.parts or '\\' in name:
-                  raise RuntimeError('A runtime archive contains an unsafe path.')
-              return value
-
-          with zipfile.ZipFile(root / windows) as archive:
-              names = archive.namelist()
-              if len(names) != len(set(names)):
-                  raise RuntimeError('Windows runtime archive contains duplicate entries.')
-              for name in names:
-                  safe_path(name)
-              manifest = json.loads(archive.read('runtime-manifest.json'))
-              if manifest.get('version') != tag or manifest.get('platform') != 'windows-x64' or manifest.get('linkage') != 'dynamic':
-                  raise RuntimeError('Windows runtime manifest does not match this release.')
-              for name in ('mclauncher-qt.exe', 'SUPPORTING_MATERIALS.zip'):
-                  if archive.getinfo(name).file_size == 0:
-                      raise RuntimeError('Windows runtime package is incomplete.')
-
-          linux_root = f'LittleCraftLauncher-{tag}-linux-x86_64'
-          with tarfile.open(root / linux, 'r:gz') as archive:
-              names = set()
-              for entry in archive:
-                  value = safe_path(entry.name)
-                  if not value.parts or value.parts[0] != linux_root or entry.name in names:
-                      raise RuntimeError('Linux runtime archive root does not match this release.')
-                  names.add(entry.name)
-              for name in ('mclauncher-qt', 'LittleCraftLauncher', 'SUPPORTING_MATERIALS.zip'):
-                  if f'{linux_root}/{name}' not in names:
-                      raise RuntimeError('Linux runtime package is incomplete.')
-          print('Verified both runtime package identities and all four pinned Qt source archives.')
-          PY
-
-      - name: Publish verified packages as a prerelease
+      - name: Verify packages and publish two downloads
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION_TAG: ${{ inputs.tag }}
         run: |
-          cd release-assets
-          win="LittleCraftLauncher-$VERSION_TAG-windows-x64.zip"
-          linux="LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"
-          qt_sources=(qtbase-everywhere-src-6.8.3.zip qtdeclarative-everywhere-src-6.8.3.zip qtsvg-everywhere-src-6.8.3.zip qtimageformats-everywhere-src-6.8.3.zip)
-          sha256sum "$win" "$linux" "${qt_sources[@]}" > SHA256SUMS.txt
-          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          这是用于测试的预发布版本，不是正式版。启动器源码继续保持私有。
-
-          - **Windows x64**：下载 Windows ZIP，完整解压后运行 `mclauncher-qt.exe`。运行库随包提供，请勿只拷贝 EXE。程序尚未签名。
-          - **Linux x86_64（Ubuntu 22.04 及更新兼容环境）**：下载并解压 `.tar.gz`，运行其中的 `./LittleCraftLauncher`。这是界面与本地功能的实验预览；游戏依赖解析仍有 Windows 专用逻辑，在线登录的凭据保护和托管 Java 下载尚未完成 Linux 适配，不能视为可正常启动游戏的 Linux 版本。
-          - 本版本未内置项目授权的 Microsoft Client ID，微软登录仍需后续配置；LittleSkin 使用已配置的公共客户端 ID。
-          - 下载后可用 `SHA256SUMS.txt` 校验文件。Qt 动态库随运行包提供；许可证、依赖材料获取入口及替换说明见包内的 `SUPPORTING_MATERIALS.zip`。
-          - 另外四个 `qt*-everywhere-src-6.8.3.zip` 是对应 Qt 开源依赖的官方源码归档，仅供查阅或替换依赖；使用启动器无需下载它们，也不包含启动器源码。
-          - 两个平台的构建任务均已完成完整本地回归与解压后程序启动检查；本次发布复用同一源码标签对应的这些已验证产物。不代表完成真实账号认证、Minecraft 游戏或各发行版兼容性验收。
-
-          GitHub 自动生成的 “Source code” 压缩包只包含此公开发布仓库的介绍和构建工具，不包含启动器源码。
-          NOTES
-          gh release create "$VERSION_TAG" "$win" "$linux" "${qt_sources[@]}" SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Little Craft Launcher $VERSION_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
-            --draft --prerelease --latest=false
-          gh release edit "$VERSION_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
-
-      - name: Checkout public artifact cleanup tools
-        id: cleanup-tools
-        continue-on-error: true
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          path: cleanup-tools
-          persist-credentials: false
+          python3 release-tools/.github/scripts/publish-prerelease.py \
+            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
+            --target "$GITHUB_SHA" --assets release-assets
 
       - name: Remove temporary packages after verifying the published prerelease
-        if: success() && steps.cleanup-tools.outcome == 'success'
+        if: success()
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -242,6 +150,6 @@ jobs:
           WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
           LINUX_RUN_ID: ${{ inputs.linux_run_id }}
         run: |
-          python3 cleanup-tools/.github/scripts/prune-published-artifacts.py \
+          python3 release-tools/.github/scripts/prune-published-artifacts.py \
             --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
             --run-id "$WINDOWS_RUN_ID" --run-id "$LINUX_RUN_ID"
