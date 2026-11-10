@@ -6,20 +6,20 @@
 
 **Your worlds, your mods, your next adventure — kept in order.**
 
-A native Minecraft Java Edition launcher for Windows, with separate instances for each way you play.
+A native Minecraft Java Edition launcher for Windows and Linux, with separate instances for each way you play.
 
 **English** · [简体中文](README.zh-CN.md)
 
 [Downloads and release notes](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) · [Accounts and data](#accounts-and-data) · [Report an issue](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues)
 
-Windows 10/11 x64 · Twelve themes · Qt 6.8 / C++20 / QML
+Windows 10/11 x64 · Linux x86_64 · Twelve themes + one experimental theme · Qt 6.8 / C++20 / QML
 
 </div>
 
 ![Launchpad development preview](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 is in prerelease testing.** [v1.0.0-pre.4](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases/tag/v1.0.0-pre.4) provides a Windows x64 runtime package and a Linux x86_64 experimental interface preview. There is no stable release yet. Read the release notes for installation, sign-in availability and Linux limitations.
+> **1.0.0 is in prerelease testing.** The pre.5 update adds Linux game launch, managed Java and system-keyring credential storage, with a single AppImage for Linux and a ZIP for Windows. Download available builds from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) and read their installation and account requirements. There is no stable release yet.
 >
 > Interface previews use Simplified Chinese. The screenshots show development windows, not a released Windows build.
 
@@ -30,6 +30,14 @@ Windows 10/11 x64 · Twelve themes · Qt 6.8 / C++20 / QML
 3. **Create or import an instance.** Pick a game version and loader, wait for the game files, then launch from Home. Back up your worlds before changing versions or modpacks.
 
 Minecraft, Java and account credentials are not bundled.
+
+### Linux AppImage
+
+The pre.5 AppImage targets Ubuntu 22.04 or newer on x86_64, with X11/XWayland or Wayland. Make the downloaded file executable and run it. Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. Qt is bundled; graphics drivers and desktop services come from the system.
+
+Linux supports game launch and downloads of the official Java 8/17/21/25 runtimes. You can also select a locally installed Java that matches the game version. Saving online credentials requires an available system keyring; see [Accounts and data](#accounts-and-data).
+
+The older [v1.0.0-pre.4](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases/tag/v1.0.0-pre.4) remains an interface preview without these Linux features. Its TAR package must be extracted in full and started through `LittleCraftLauncher`; running its inner ELF directly can bypass the runtime setup. Existing pre.4 downloads are unchanged.
 
 ## What it does
 
@@ -88,15 +96,21 @@ Without Microsoft configuration, that sign-in flow is unavailable, so no account
 
 LittleSkin is an address suggestion, not automatic trust. External authentication sends that service's credentials only after the user explicitly trusts the selected service. **Do not enter a Microsoft password into an external-authentication form.** External or local identities do not establish Minecraft ownership or grant access to official online services.
 
+### Linux system keyring
+
+Linux saves online credentials through the desktop's Secret Service keyring, such as GNOME Keyring or KeePassXC with Secret Service integration enabled. A working desktop session and an available, unlockable keyring are required. The launcher does not include a keyring daemon. A missing service, failed unlock, cancellation or timeout stops the operation with an error; credentials are not saved as plaintext instead.
+
 ### Local data
 
-- New installs use per-user local application data; an existing `mclauncher-qt-data` beside the EXE stays in use.
-- `--portable` uses the portable directory beside the EXE; `--data-root` sets an absolute path and takes precedence.
+- New installs use per-user local application data; an existing `mclauncher-qt-data` beside the program stays in use.
+- `--portable` uses the directory beside the Windows EXE or Linux AppImage. AppImage portable data stays beside the downloaded file, outside its temporary mount. `--data-root` sets an absolute path and takes precedence.
 - Data never moves between locations on its own. Close the game and launcher before backing up or moving the whole directory.
 
 ## Feedback and project information
 
 Maintained by [TaoXiaoBai](https://github.com/TaoXiaoBai). This repository is the public home for project information, releases and [issue reports](https://github.com/TaoXiaoBai/little-craft-launcher-releases/issues).
+
+Launcher QQ community: **827507229**.
 
 When reporting a problem, include the launcher version, operating system, reproduction steps, expected and actual behavior, and only the relevant redacted logs. Review logs before sharing them. Keep passwords, access tokens, account databases and private worlds out of public reports.
 

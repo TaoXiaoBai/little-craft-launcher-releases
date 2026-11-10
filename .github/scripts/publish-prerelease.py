@@ -11,7 +11,8 @@ import tarfile
 import tempfile
 import zipfile
 
-from release_support import QT_SOURCE_ARCHIVES, release_notes, runtime_names, verify_published_assets
+from appimage_format import inspect_appimage
+from release_support import LEGACY_LINUX_TAGS, dependency_archives, release_notes, runtime_names, verify_published_assets
 
 
 def checksum(path):
@@ -31,13 +32,14 @@ def safe_path(name):
 
 def validate_inputs(root, tag):
     windows, linux = runtime_names(tag)
+    qt_archives = dependency_archives(tag)
     entries = list(root.iterdir())
-    expected = {windows, linux, *QT_SOURCE_ARCHIVES}
-    if (len(entries) != 6 or {path.name for path in entries} != expected
+    expected = {windows, linux, *qt_archives}
+    if (len(entries) != len(expected) or {path.name for path in entries} != expected
             or any(path.is_symlink() or not path.is_file() or path.stat().st_size == 0
                    for path in entries)):
-        raise ValueError("Expected two runtime packages and four verified Qt dependency archives")
-    for name, (size, digest) in QT_SOURCE_ARCHIVES.items():
+        raise ValueError("Expected two runtime packages and their exact verified Qt dependency archives")
+    for name, (size, digest) in qt_archives.items():
         path = root / name
         if path.stat().st_size != size or checksum(path) != digest:
             raise ValueError("A Qt dependency archive differs from its pinned upstream bytes")
@@ -55,8 +57,16 @@ def validate_inputs(root, tag):
             info = archive.getinfo(name)
             if info.is_dir() or info.file_size == 0:
                 raise ValueError("Windows runtime package is incomplete")
+    if tag not in LEGACY_LINUX_TAGS:
+        inspect_appimage(root / linux, tag)
+    else:
+        validate_legacy_linux(root / linux, tag)
+    return {name: checksum(root / name) for name in (windows, linux)}
+
+
+def validate_legacy_linux(path, tag):
     linux_root = f"LittleCraftLauncher-{tag}-linux-x86_64"
-    with tarfile.open(root / linux, "r:gz") as archive:
+    with tarfile.open(path, "r:gz") as archive:
         names = set()
         ordinary_files = set()
         for entry in archive:
@@ -69,7 +79,6 @@ def validate_inputs(root, tag):
         for name in ("mclauncher-qt", "LittleCraftLauncher", "SUPPORTING_MATERIALS.zip"):
             if f"{linux_root}/{name}" not in ordinary_files:
                 raise ValueError("Linux runtime package is incomplete")
-    return {name: checksum(root / name) for name in (windows, linux)}
 
 
 def publish(repository, tag, root, target, changes=None, run=subprocess.run):

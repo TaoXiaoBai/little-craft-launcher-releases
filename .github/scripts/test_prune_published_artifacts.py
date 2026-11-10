@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
-from release_support import release_notes
+from release_support import release_notes, runtime_names
 
 SPEC = importlib.util.spec_from_file_location(
     "prune_published_artifacts", SCRIPT_ROOT / "prune-published-artifacts.py"
@@ -26,6 +26,9 @@ WINDOWS = f"LittleCraftLauncher-{TAG}-windows-x64.zip"
 LINUX = f"LittleCraftLauncher-{TAG}-linux-x86_64.tar.gz"
 HASHES = {WINDOWS: "a" * 64, LINUX: "b" * 64}
 QTBASE_SHA = "992bf7766e214a341ef793eb3665fb784787d2fd666955f5f507f4c6f1f770dd"
+QTWAYLAND_NAME = "qtwayland-everywhere-src-6.8.3.zip"
+QTWAYLAND_URL = "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/" + QTWAYLAND_NAME
+QTWAYLAND_SHA = "4c2773404c4aeaac1963ef0aecd858e0f58ca07ee7689d4c785dd17fe5611ef6"
 
 
 def artifact(identity, name, expired=False):
@@ -37,16 +40,19 @@ def job(platform, conclusion):
 
 
 class GitHubFixture:
-    def __init__(self):
+    def __init__(self, tag=TAG):
+        self.tag = tag
+        windows, linux = runtime_names(tag)
+        hashes = {windows: "a" * 64, linux: "b" * 64}
         self.metadata = {"full_name": REPOSITORY, "private": False, "default_branch": "main"}
         self.release = {
-            "id": 31, "tag_name": TAG, "draft": False, "prerelease": True,
-            "body": release_notes(REPOSITORY, TAG, HASHES),
+            "id": 31, "tag_name": tag, "draft": False, "prerelease": True,
+            "body": release_notes(REPOSITORY, tag, hashes),
         }
         self.assets = [
             {"id": 41 + index, "name": name, "size": 100 + index,
              "state": "uploaded", "digest": f"sha256:{digest}"}
-            for index, (name, digest) in enumerate(HASHES.items())
+            for index, (name, digest) in enumerate(hashes.items())
         ]
         self.workflow = {"path": ".github/workflows/prerelease.yml"}
         self.runs = {}
@@ -56,7 +62,7 @@ class GitHubFixture:
                     "id": run_id, "workflow_id": 51, "repository": {"full_name": REPOSITORY},
                     "head_repository": {"full_name": REPOSITORY}, "event": "workflow_dispatch",
                     "head_branch": "main", "path": ".github/workflows/prerelease.yml",
-                    "display_title": f"Prerelease {TAG} (both)", "status": "in_progress",
+                    "display_title": f"Prerelease {tag} (both)", "status": "in_progress",
                 },
                 "jobs": [job("windows-x64", "success" if run_id == 1 else "failure"),
                          job("linux-x86_64", "success" if run_id == 2 else "failure")],
@@ -70,6 +76,8 @@ class GitHubFixture:
             artifact(201, "release-linux-x86_64"), artifact(202, "encrypted-diagnostics-linux-x86_64"),
             artifact(203, "release-windows-x64"),
         ]
+        if linux.endswith(".AppImage"):
+            self.runs["2"]["artifacts"].append(artifact(204, "release-qt-wayland-source"))
         self.deletions = []
 
     def __call__(self, path, method="GET"):
@@ -93,7 +101,7 @@ class GitHubFixture:
             raise AssertionError(f"Unexpected API method: {method}")
         if endpoint == base:
             return copy.deepcopy(self.metadata)
-        if endpoint == f"{base}/releases/tags/{TAG}":
+        if endpoint == f"{base}/releases/tags/{self.tag}":
             return copy.deepcopy(self.release)
         if endpoint == f"{base}/releases/31/assets":
             return self.page(self.assets, route.query)
@@ -133,6 +141,18 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(self.api.deletions, [101, 102, 201])
         self.assertEqual([item["id"] for item in self.api.runs["1"]["artifacts"]], [103, 104])
         self.assertEqual([item["id"] for item in self.api.runs["2"]["artifacts"]], [202, 203])
+
+    def test_frozen_pre4_tar_and_four_source_body_do_not_require_wayland(self):
+        self.assertEqual({item["name"] for item in self.api.assets}, {WINDOWS, LINUX})
+        self.assertNotIn(QTWAYLAND_NAME, self.api.release["body"])
+        self.assertNotIn(QTWAYLAND_SHA, self.api.release["body"])
+        self.assertEqual(self.prune(), 3)
+
+    def test_frozen_pre4_retains_an_unrelated_wayland_source_artifact(self):
+        self.api.runs["2"]["artifacts"].append(artifact(204, "release-qt-wayland-source"))
+        self.assertEqual(self.prune(), 3)
+        self.assertEqual(self.api.deletions, [101, 102, 201])
+        self.assertIn(204, [item["id"] for item in self.api.runs["2"]["artifacts"]])
 
     def test_dry_run_makes_no_delete_calls(self):
         self.assertEqual(self.prune(dry_run=True), 3)
@@ -250,6 +270,68 @@ class PruneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prune(("1", True))
         self.assertEqual(self.api.deletions, [])
+
+
+class AppImagePruneTests(unittest.TestCase):
+    def setUp(self):
+        self.tag = "v1.0.0-pre.5"
+        self.api = GitHubFixture(self.tag)
+
+    def prune(self):
+        return PRUNE.prune(REPOSITORY, self.tag, ("1", "2"), api=self.api)
+
+    def rejected_without_deletion(self):
+        with self.assertRaises(ValueError):
+            self.prune()
+        self.assertEqual(self.api.deletions, [])
+
+    def test_two_new_runtime_assets_and_five_sources_allow_cleanup(self):
+        self.assertEqual({item["name"] for item in self.api.assets}, {
+            f"LittleCraftLauncher-{self.tag}-windows-x64.zip",
+            f"LittleCraftLauncher-{self.tag}-linux-x86_64.AppImage",
+        })
+        self.assertIn(f"({QTWAYLAND_URL})", self.api.release["body"])
+        self.assertIn(f"`{QTWAYLAND_SHA}`", self.api.release["body"])
+        self.assertEqual(self.prune(), 4)
+        self.assertEqual(self.api.deletions, [101, 102, 201, 204])
+        self.assertEqual([item["id"] for item in self.api.runs["1"]["artifacts"]], [103, 104])
+        self.assertEqual([item["id"] for item in self.api.runs["2"]["artifacts"]], [202, 203])
+
+    def test_failed_linux_job_retains_its_runtime_and_wayland_source(self):
+        self.api.runs["2"]["jobs"][1]["conclusion"] = "failure"
+        self.assertEqual(self.prune(), 2)
+        self.assertEqual(self.api.deletions, [101, 102])
+        self.assertEqual([item["id"] for item in self.api.runs["2"]["artifacts"]],
+                         [201, 202, 203, 204])
+
+    def test_duplicate_wayland_sources_block_every_deletion(self):
+        self.api.runs["2"]["artifacts"].append(artifact(205, "release-qt-wayland-source"))
+        self.rejected_without_deletion()
+
+    def test_missing_wayland_source_link_blocks_every_deletion(self):
+        self.assertIn(QTWAYLAND_URL, self.api.release["body"])
+        self.api.release["body"] = self.api.release["body"].replace(
+            QTWAYLAND_URL, "https://example.org/source.zip")
+        self.rejected_without_deletion()
+
+    def test_missing_wayland_source_checksum_blocks_every_deletion(self):
+        self.assertIn(QTWAYLAND_SHA, self.api.release["body"])
+        self.api.release["body"] = self.api.release["body"].replace(QTWAYLAND_SHA, "d" * 64)
+        self.rejected_without_deletion()
+
+    def test_new_tag_cannot_substitute_the_old_tar_format(self):
+        name = f"LittleCraftLauncher-{self.tag}-linux-x86_64.AppImage"
+        old_name = name.removesuffix(".AppImage") + ".tar.gz"
+        self.api.assets[1]["name"] = old_name
+        self.api.release["body"] = self.api.release["body"].replace(name, old_name)
+        self.rejected_without_deletion()
+
+    def test_third_dependency_asset_blocks_every_deletion(self):
+        self.api.assets.append({
+            "id": 43, "name": QTWAYLAND_NAME, "size": 2148676,
+            "state": "uploaded", "digest": "sha256:" + QTWAYLAND_SHA,
+        })
+        self.rejected_without_deletion()
 
 
 if __name__ == "__main__":

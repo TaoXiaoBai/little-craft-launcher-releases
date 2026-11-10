@@ -8,13 +8,14 @@ import re
 import subprocess
 import sys
 
-from release_support import verify_published_assets
+from release_support import LEGACY_LINUX_TAGS, verify_published_assets
 
 
 ARTIFACT_PLATFORMS = {
     "release-windows-x64": "windows-x64",
     "release-linux-x86_64": "linux-x86_64",
     "release-qt-dependency-sources": "windows-x64",
+    "release-qt-wayland-source": "linux-x86_64",
 }
 
 
@@ -70,6 +71,10 @@ def prune(repository, tag, run_ids, api=github_api, dry_run=False):
     release_id = positive_id(release.get("id"))
     assets = paginated(api, f"{prefix}/releases/{release_id}/assets")
     verify_published_assets(tag, assets, release.get("body", ""))
+    artifact_platforms = dict(ARTIFACT_PLATFORMS)
+    if tag in LEGACY_LINUX_TAGS:
+        # The frozen TAR release never owned a Wayland dependency artifact.
+        artifact_platforms.pop("release-qt-wayland-source")
 
     # Validate every supplied run before deleting anything. Overall run status
     # may still be in_progress while its successful build jobs are publishing.
@@ -95,13 +100,13 @@ def prune(repository, tag, run_ids, api=github_api, dry_run=False):
             raise ValueError("Unexpected source workflow")
         jobs = paginated(api, f"{run_prefix}/jobs", "jobs")
         successful = set()
-        for platform in set(ARTIFACT_PLATFORMS.values()):
+        for platform in set(artifact_platforms.values()):
             matches = [job for job in jobs if job.get("name") == f"Build {platform}"]
             if (len(matches) == 1 and matches[0].get("status") == "completed"
                     and matches[0].get("conclusion") == "success"):
                 successful.add(platform)
         artifacts = paginated(api, f"{run_prefix}/artifacts", "artifacts")
-        for name, platform in ARTIFACT_PLATFORMS.items():
+        for name, platform in artifact_platforms.items():
             if platform not in successful:
                 continue
             matches = [item for item in artifacts if item.get("name") == name and not item.get("expired")]

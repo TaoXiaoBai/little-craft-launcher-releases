@@ -2,15 +2,19 @@
 """Verify tiny real archives and mocked publication without network access."""
 
 import copy
+import contextlib
 import hashlib
 import importlib.util
 import io
 import json
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tarfile
 import tempfile
+import time
+import textwrap
 import unittest
 from unittest import mock
 import warnings
@@ -20,6 +24,7 @@ import zipfile
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 import release_support as SUPPORT
+import appimage_format as APPIMAGE
 
 SPEC = importlib.util.spec_from_file_location(
     "publish_prerelease", SCRIPT_ROOT / "publish-prerelease.py"
@@ -85,20 +90,21 @@ class ArchiveFixture:
 
 
 class MockGitHub:
-    def __init__(self, hashes, mutate=None, preceding_releases=0):
+    def __init__(self, hashes, mutate=None, preceding_releases=0, tag=TAG):
         self.hashes = hashes
         self.mutate = mutate
         self.preceding_releases = preceding_releases
         self.calls = []
         self.release = None
         self.notes = None
+        self.tag = tag
 
     def __call__(self, command, **options):
         self.calls.append((list(command), dict(options)))
         if command[:3] == ["gh", "release", "create"]:
             self.notes = Path(command[command.index("--notes-file") + 1]).read_text(encoding="utf-8")
             self.release = {
-                "id": 31, "tag_name": TAG, "draft": True, "prerelease": True, "body": self.notes,
+                "id": 31, "tag_name": self.tag, "draft": True, "prerelease": True, "body": self.notes,
                 "assets": [{"id": 41 + index, "name": name, "size": 100 + index,
                             "state": "uploaded", "digest": "sha256:" + digest}
                            for index, (name, digest) in enumerate(self.hashes.items())],
@@ -131,7 +137,7 @@ class ArchiveAndPublishTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.fixture = ArchiveFixture(self.root)
-        self.patch = mock.patch.object(PUBLISH, "QT_SOURCE_ARCHIVES", self.fixture.qt_pins)
+        self.patch = mock.patch.object(PUBLISH, "dependency_archives", return_value=self.fixture.qt_pins)
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
@@ -353,6 +359,16 @@ class ReleaseNotesTests(unittest.TestCase):
             self.assertIn(f"({SUPPORT.QT_SOURCE_BASE_URL}{name})", sources)
             self.assertIn(f"`{digest}`", sources)
 
+    def test_pre4_notes_remain_byte_for_byte_frozen(self):
+        fixtures = (
+            (None, "635973fa6f26fa156c0d2d364b3ee3a0e3a307653af1219c5db420de6f93facb"),
+            ("仅整理下载附件，应用二进制保持原样。", "4b76660d1907be4cca6b3372ba3b49342be3a66ba86668b1b7b7090fa2da813f"),
+        )
+        for changes, expected in fixtures:
+            with self.subTest(changes=changes):
+                body = SUPPORT.release_notes(REPOSITORY, TAG, self.hashes, changes)
+                self.assertEqual(hashlib.sha256(body.encode("utf-8")).hexdigest(), expected)
+
     def test_actual_change_intro_is_used_without_inventing_ui_upgrades(self):
         changes = "仅整理下载附件，应用二进制保持原样。"
         body = SUPPORT.release_notes(REPOSITORY, TAG, self.hashes, changes)
@@ -363,6 +379,341 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("动画升级", body)
         self.assertIn("Linux 暂不支持游戏启动", body)
         self.assertIn("Microsoft 登录暂不可用", body)
+
+    def test_new_appimage_has_five_sources_while_pre4_remains_frozen(self):
+        tag = "v1.0.0-pre.5"
+        windows, linux = SUPPORT.runtime_names(tag)
+        self.assertTrue(linux.endswith(".AppImage"))
+        self.assertTrue(LINUX.endswith(".tar.gz"))
+        self.assertEqual(len(SUPPORT.QT_SOURCE_ARCHIVES), 4)
+        self.assertEqual(SUPPORT.dependency_archives(TAG), SUPPORT.QT_SOURCE_ARCHIVES)
+        self.assertEqual(len(SUPPORT.dependency_archives(tag)), 5)
+        body = SUPPORT.release_notes(REPOSITORY, tag, {windows: "a" * 64, linux: "b" * 64})
+        for name, (_, digest) in SUPPORT.dependency_archives(tag).items():
+            self.assertIn(f"({SUPPORT.QT_SOURCE_BASE_URL}{name})", body)
+            self.assertIn(f"`{digest}`", body)
+        self.assertIn("X11 / Wayland", body)
+        self.assertNotIn("qtwayland-everywhere", SUPPORT.release_notes(REPOSITORY, TAG, self.hashes))
+
+    def test_pre5_describes_linux_capabilities_and_keyring_requirements(self):
+        tag = "v1.0.0-pre.5"
+        windows, linux = SUPPORT.runtime_names(tag)
+        hashes = {windows: "a" * 64, linux: "b" * 64}
+        body = SUPPORT.release_notes(REPOSITORY, tag, hashes)
+        primary = body.split("<details>", 1)[0]
+        self.assertIn("Linux x86_64 游戏启动", primary)
+        self.assertIn("Java 8/17/21/25", primary)
+        self.assertIn("Secret Service", primary)
+        self.assertIn("不回退明文", primary)
+        self.assertIn("无法解锁、取消或超时", primary)
+        self.assertIn("Microsoft 登录仍等待项目客户端配置及相关服务准入", primary)
+        self.assertNotIn("Linux 暂不支持游戏启动", body)
+        self.assertNotIn("Linux 实验预览", body)
+        self.assertNotIn(hashes[windows], primary)
+        self.assertNotIn(SUPPORT.QT_SOURCE_BASE_URL, primary)
+        self.assertEqual(len(SUPPORT.runtime_names(tag)), 2)
+
+
+def elf_header(appimage=False):
+    identity = bytearray(b"\x7fELF\x02\x01\x01" + bytes(9))
+    if appimage:
+        identity[8:11] = b"AI\x02"
+    return struct.pack("<16sHHIQQQIHHHHHH", bytes(identity), 3, 62, 1,
+                       0, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+
+
+def appimage_bytes(offset=256, section_end=None):
+    end = section_end or 256
+    data = bytearray(max(end, offset) + 96)
+    data[:64] = elf_header(appimage=True)
+    struct.pack_into("<IIQQQQQQ", data, 64, 1, 5, 0, 0, 0, 256, 256, 4096)
+    if section_end:
+        struct.pack_into("<Q", data, 40, 120)
+        struct.pack_into("<HH", data, 58, 64, 2)
+        struct.pack_into("<IIQQQQIIQQ", data, 184, 0, 1, 0, 0, 256, section_end - 256, 0, 0, 1, 0)
+    data[offset:offset + 4] = b"hsqs"
+    struct.pack_into("<I", data, offset + 4, 20)
+    struct.pack_into("<I", data, offset + 12, 131072)
+    struct.pack_into("<HH", data, offset + 28, 4, 0)
+    struct.pack_into("<Q", data, offset + 40, 96)
+    return bytes(data)
+
+
+class AppImageFixture:
+    def __init__(self, path, tag="v1.0.0-pre.5"):
+        self.path, self.tag = path, tag
+        self.path.write_bytes(appimage_bytes())
+        self.manifest = {"schema": 2, "version": tag, "platform": "linux-x86_64", "format": "appimage",
+                         "qt": "6.8.3", "linkage": "dynamic", "displayBackends": ["xcb", "wayland"],
+                         "application": "usr/bin/mclauncher-qt"}
+        self.contents = {"AppRun": b"#!/bin/sh\nexec ./usr/bin/mclauncher-qt\n",
+                         "SUPPORTING_MATERIALS.zip": tiny_zip([("NOTICE.txt", b"legal material")]),
+                         "usr/bin/mclauncher-qt": elf_header()}
+        for name in ("libqxcb.so", "libqwayland-generic.so", "libqwayland-egl.so"):
+            self.contents["usr/plugins/platforms/" + name] = elf_header()
+        self.extra_entries = []
+        self.linked = set()
+        self.commands = []
+
+    def reader(self, command, maximum, deadline):
+        self.commands.append(command)
+        if "-lln" in command:
+            entries = [*self.contents, "runtime-manifest.json", *self.extra_entries]
+            rows = []
+            for name in entries:
+                mode = "lrwxrwxrwx" if name in self.linked else "-rwxr-xr-x"
+                target = " -> outside" if name in self.linked else ""
+                rows.append(f"{mode} 0/0 100 2026-01-01 00:00 squashfs-root/{name}{target}")
+            return "\n".join(rows).encode()
+        if "-cat" not in command:
+            raise AssertionError("An uploaded runtime must never be executed")
+        name = command[-1]
+        return json.dumps(self.manifest).encode() if name == "runtime-manifest.json" else self.contents[name]
+
+    def patches(self, case):
+        for patch in (mock.patch.object(APPIMAGE.shutil, "which", return_value="/fixture/unsquashfs"),
+                      mock.patch.object(APPIMAGE, "_bounded_run", side_effect=self.reader)):
+            patch.start()
+            case.addCleanup(patch.stop)
+
+
+class AppImageInspectionTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="static appimage fixture-")
+        self.addCleanup(temporary.cleanup)
+        self.path = Path(temporary.name) / "launcher.AppImage"
+        self.fixture = AppImageFixture(self.path)
+        self.fixture.patches(self)
+
+    def inspect(self):
+        return APPIMAGE.inspect_appimage(self.path, self.fixture.tag)
+
+    def test_static_inspection_uses_only_system_unsquashfs(self):
+        self.assertEqual(self.inspect(), self.fixture.manifest)
+        self.assertTrue(self.fixture.commands)
+        self.assertTrue(all(command[0] == "/fixture/unsquashfs" for command in self.fixture.commands))
+        self.assertTrue(all(command[command.index("-offset") + 1] == "256"
+                            for command in self.fixture.commands))
+
+    def test_local_candidate_tag_can_be_inspected_but_not_published(self):
+        tag = "v1.0.0-pre.4-appimage-test"
+        self.fixture.tag = tag
+        self.fixture.manifest["version"] = tag
+        self.assertEqual(self.inspect()["version"], tag)
+        runner = mock.Mock()
+        with self.assertRaises(ValueError):
+            PUBLISH.publish(REPOSITORY, tag, self.path.parent, TARGET, run=runner)
+        runner.assert_not_called()
+
+    def test_unsafe_or_unbounded_local_tags_reject_before_decompression(self):
+        for tag in ("../outside", "tag with spaces", "tag\n", "a" * 102, "", None):
+            with self.subTest(tag=tag):
+                with self.assertRaises(ValueError):
+                    APPIMAGE.inspect_appimage(self.path, tag)
+        self.assertEqual(self.fixture.commands, [])
+
+    def test_section_file_end_and_page_aligned_offsets_are_supported(self):
+        for offset, section_end in ((300, 300), (4096, None)):
+            with self.subTest(offset=offset):
+                self.path.write_bytes(appimage_bytes(offset, section_end))
+                self.assertEqual(APPIMAGE._filesystem_offset(self.path), offset)
+
+    def test_unrelated_magic_is_not_searched(self):
+        self.path.write_bytes(appimage_bytes(8192))
+        with self.assertRaises(ValueError):
+            self.inspect()
+        self.assertEqual(self.fixture.commands, [])
+
+    def test_bad_marker_architecture_and_elf_bounds_reject_before_decompression(self):
+        original = appimage_bytes()
+        for offset, payload in ((8, b"BAD"), (18, b"\xb7\x00"), (64 + 32, struct.pack("<Q", 2**32))):
+            with self.subTest(offset=offset):
+                data = bytearray(original)
+                data[offset:offset + len(payload)] = payload
+                self.path.write_bytes(data)
+                with self.assertRaises(ValueError):
+                    self.inspect()
+        self.assertEqual(self.fixture.commands, [])
+
+    def test_superblock_cannot_extend_outside_image(self):
+        data = bytearray(appimage_bytes())
+        struct.pack_into("<Q", data, 256 + 40, 100000)
+        self.path.write_bytes(data)
+        with self.assertRaises(ValueError):
+            self.inspect()
+
+    def test_wrong_runtime_identity_or_missing_backend_rejects(self):
+        original = dict(self.fixture.manifest)
+        for key, value in (("schema", 1), ("version", TAG), ("platform", "windows-x64"),
+                           ("format", "tar"), ("qt", "6.8.2"), ("linkage", "static"),
+                           ("displayBackends", ["xcb"]), ("application", "../outside")):
+            with self.subTest(key=key):
+                self.fixture.manifest = {**original, key: value}
+                with self.assertRaises(ValueError):
+                    self.inspect()
+
+    def test_missing_wayland_plugin_or_linked_application_rejects(self):
+        del self.fixture.contents["usr/plugins/platforms/libqwayland-egl.so"]
+        with self.assertRaises(ValueError):
+            self.inspect()
+        self.fixture.contents["usr/plugins/platforms/libqwayland-egl.so"] = elf_header()
+        self.fixture.linked.add("usr/bin/mclauncher-qt")
+        with self.assertRaises(ValueError):
+            self.inspect()
+
+    def test_obvious_private_source_build_and_credentials_reject(self):
+        for name in ("source/qt-native/src/main.cpp", "ApplicationSnapshot/main.cpp",
+                     "usr/bin/main.cpp", "usr/secret.key"):
+            with self.subTest(name=name):
+                self.fixture.extra_entries = [name]
+                with self.assertRaises(ValueError):
+                    self.inspect()
+
+
+class AppImagePublishTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="appimage publisher fixture-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        legacy = ArchiveFixture(self.root)
+        self.tag = "v1.0.0-pre.5"
+        self.windows, self.linux = SUPPORT.runtime_names(self.tag)
+        manifest = json.loads(legacy.windows_entries[0][1])
+        manifest["version"] = self.tag
+        (self.root / self.windows).write_bytes(tiny_zip([
+            ("runtime-manifest.json", json.dumps(manifest).encode()), *legacy.windows_entries[1:]]))
+        (self.root / WINDOWS).unlink()
+        (self.root / LINUX).unlink()
+        self.image = AppImageFixture(self.root / self.linux, self.tag)
+        self.image.patches(self)
+        name = next(iter(SUPPORT.WAYLAND_SOURCE_ARCHIVE))
+        payload = tiny_zip([("LICENSE.txt", b"synthetic Wayland upstream archive")])
+        (self.root / name).write_bytes(payload)
+        self.pins = {**legacy.qt_pins, name: (len(payload), hashlib.sha256(payload).hexdigest())}
+        patch = mock.patch.object(PUBLISH, "dependency_archives", return_value=self.pins)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_new_runtime_and_five_sources_validate_and_publish_only_two_assets(self):
+        hashes = PUBLISH.validate_inputs(self.root, self.tag)
+        self.assertEqual(set(hashes), {self.windows, self.linux})
+        runner = MockGitHub(hashes, tag=self.tag)
+        PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
+        create = runner.calls[0][0]
+        self.assertEqual(set(create[4:6]), {str(self.root / self.windows), str(self.root / self.linux)})
+        self.assertFalse(any(name in create for name in self.pins))
+        self.assertEqual(len(runner.edits), 1)
+
+    def test_missing_wayland_source_and_extra_private_snapshot_never_reach_github(self):
+        source = self.root / next(iter(SUPPORT.WAYLAND_SOURCE_ARCHIVE))
+        payload = source.read_bytes()
+        for mutation in ("missing-wayland", "private-snapshot"):
+            with self.subTest(mutation=mutation):
+                source.write_bytes(payload)
+                extra = self.root / "private-source.zip"
+                if mutation == "missing-wayland":
+                    source.unlink()
+                else:
+                    extra.write_bytes(b"private")
+                runner = mock.Mock()
+                with self.assertRaises(ValueError):
+                    PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
+                runner.assert_not_called()
+
+    def test_bad_appimage_metadata_never_reaches_github(self):
+        self.image.manifest["linkage"] = "static"
+        runner = mock.Mock()
+        with self.assertRaises(ValueError):
+            PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
+        runner.assert_not_called()
+
+
+class BoundedReaderTests(unittest.TestCase):
+    def test_known_reader_output_is_returned(self):
+        result = APPIMAGE._bounded_run([sys.executable, "-c", "print('bounded')"], 64,
+                                       time.monotonic() + 5)
+        self.assertEqual(result, b"bounded\n")
+
+    def test_excess_stdout_and_stderr_are_stopped(self):
+        for stream, maximum in (("stdout", 16), ("stderr", 1024)):
+            with self.subTest(stream=stream):
+                command = [sys.executable, "-c", f"import sys; sys.{stream}.write('x' * 100000)"]
+                with self.assertRaisesRegex(ValueError, "exceeds its bound"):
+                    APPIMAGE._bounded_run(command, maximum, time.monotonic() + 5)
+
+    def test_reader_deadline_and_failure_are_not_accepted(self):
+        with self.assertRaisesRegex(ValueError, "timed out"):
+            APPIMAGE._bounded_run([sys.executable, "-c", "import time; time.sleep(2)"], 64,
+                                   time.monotonic() + 0.05)
+        with self.assertRaisesRegex(ValueError, "Could not read"):
+            APPIMAGE._bounded_run([sys.executable, "-c", "raise SystemExit(1)"], 64,
+                                   time.monotonic() + 5)
+
+
+class VerifiedWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        workflow = SCRIPT_ROOT.parent / "workflows/publish-verified-prerelease.yml"
+        self.text = workflow.read_text(encoding="utf-8")
+        self.program = textwrap.dedent(self.text.split("python3 <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+
+    def verify(self, tag, wayland_count=0, linux_success=True):
+        def api(command, **options):
+            self.assertEqual(command[:2], ["gh", "api"])
+            path = command[2]
+            if "/actions/workflows/" in path:
+                result = {"path": ".github/workflows/prerelease.yml"}
+            else:
+                run_id = path.split("/actions/runs/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+                if path.endswith("/" + run_id):
+                    result = {"repository": {"full_name": REPOSITORY},
+                              "head_repository": {"full_name": REPOSITORY},
+                              "event": "workflow_dispatch", "head_branch": "main", "workflow_id": 51,
+                              "display_title": f"Prerelease {tag} (both)"}
+                elif "/jobs?" in path:
+                    platform = "windows-x64" if run_id == "1" else "linux-x86_64"
+                    result = {"jobs": [{"name": "Build " + platform, "status": "completed",
+                                        "conclusion": "success" if run_id == "1" or linux_success else "failure"}]}
+                elif "/artifacts?" in path:
+                    names = (["release-windows-x64", "release-qt-dependency-sources"] if run_id == "1" else
+                             ["release-linux-x86_64"] + ["release-qt-wayland-source"] * wayland_count)
+                    result = {"artifacts": [{"name": name, "expired": False} for name in names]}
+                else:
+                    raise AssertionError("Unexpected provenance API request")
+            return json.dumps(result)
+
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "VERSION_TAG": tag, "DEFAULT_BRANCH": "main",
+                       "WINDOWS_RUN_ID": "1", "LINUX_RUN_ID": "2"}
+        with mock.patch.dict(PUBLISH.os.environ, environment), mock.patch.object(subprocess, "check_output", side_effect=api):
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(self.program, "verified-workflow-fixture", "exec"), {})
+
+    def test_pre4_accepts_its_historical_runtime_and_four_source_artifact(self):
+        self.verify(TAG)
+
+    def test_new_tag_requires_exactly_one_wayland_source_from_linux_run(self):
+        self.verify("v1.0.0-pre.5", wayland_count=1)
+        for count in (0, 2):
+            with self.subTest(count=count):
+                with self.assertRaisesRegex(RuntimeError, "absent, expired or ambiguous"):
+                    self.verify("v1.0.0-pre.5", wayland_count=count)
+
+    def test_present_sources_cannot_override_a_failed_linux_build(self):
+        with self.assertRaisesRegex(RuntimeError, "did not succeed"):
+            self.verify("v1.0.0-pre.5", wayland_count=1, linux_success=False)
+
+    def test_dispatch_only_download_and_static_reader_conditions(self):
+        trigger = self.text.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertTrue(trigger.startswith("  workflow_dispatch:\n"))
+        self.assertEqual([line for line in trigger.splitlines() if line.startswith("  ") and not line.startswith("    ")],
+                         ["  workflow_dispatch:"])
+        download = self.text.split("      - name: Download matching Qt Wayland dependency source\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: ${{ inputs.tag != 'v1.0.0-pre.4' }}", download)
+        self.assertIn("name: release-qt-wayland-source", download)
+        self.assertIn("run-id: ${{ inputs.linux_run_id }}", download)
+        reader = self.text.split("      - name: Prepare static AppImage inspection\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: ${{ inputs.tag != 'v1.0.0-pre.4' }}", reader)
+        self.assertIn("command -v unsquashfs", reader)
+        self.assertIn("squashfs-tools", reader)
 
 
 if __name__ == "__main__":

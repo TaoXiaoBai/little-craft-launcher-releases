@@ -9,6 +9,8 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+from release_support import WAYLAND_SOURCE_ARCHIVE
+
 
 QT_SOURCES = {
     "qtbase": (74010483, "992bf7766e214a341ef793eb3665fb784787d2fd666955f5f507f4c6f1f770dd"),
@@ -59,10 +61,13 @@ def windows_archives(source_root, cache_root):
         raise ValueError("Unexpected files in public toolchain cache")
 
 
-def qt_source_archives(source_root):
+def qt_source_archives(source_root, include_wayland=False):
     downloads = source_root / "qt-native/.tools/downloads"
     for module, (size, digest) in QT_SOURCES.items():
         verify_file(downloads / f"{module}-everywhere-src-6.8.3.zip", size, digest)
+    if include_wayland:
+        for name, (size, digest) in WAYLAND_SOURCE_ARCHIVE.items():
+            verify_file(downloads / name, size, digest)
 
 
 def linux_qt_sdk(qt_root):
@@ -71,11 +76,13 @@ def linux_qt_sdk(qt_root):
         raise ValueError("Unexpected public SDK version")
     ordinary(qt_root / "bin/qmake")
     libraries = [f"lib/libQt6{module}.so.6.8.3" for module in (
-        "Core", "Gui", "Network", "Qml", "QmlModels", "Quick", "QuickControls2",
+        "Core", "Gui", "Network", "DBus", "Qml", "QmlModels", "Quick", "QuickControls2",
         "QuickTemplates2", "Svg", "Test",
     )]
     libraries += [f"lib/libicu{module}.so.73.2" for module in ("data", "i18n", "uc")]
-    libraries += ["plugins/imageformats/libqwebp.so", "plugins/platforms/libqxcb.so"]
+    libraries += ["lib/libQt6WaylandClient.so.6.8.3", "plugins/imageformats/libqwebp.so",
+                  "plugins/platforms/libqxcb.so", "plugins/platforms/libqwayland-generic.so",
+                  "plugins/platforms/libqwayland-egl.so"]
     for name in libraries:
         with ordinary(qt_root / name).open("rb") as stream:
             header = stream.read(20)
@@ -89,12 +96,13 @@ def main():
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--cache-root", type=Path)
     parser.add_argument("--qt-root", type=Path)
+    parser.add_argument("--include-wayland", action="store_true")
     args = parser.parse_args()
     try:
         if args.kind == "windows-archives":
             windows_archives(args.source_root, args.cache_root)
         elif args.kind == "qt-source-archives":
-            qt_source_archives(args.source_root)
+            qt_source_archives(args.source_root, args.include_wayland)
         else:
             linux_qt_sdk(args.qt_root)
     except Exception:
