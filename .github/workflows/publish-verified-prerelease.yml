@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       linux_run_id:
-        description: 'Build workflow run with a successful Linux job'
+        description: 'Build workflow run with a successful Linux job and matching Qt Wayland source artifact'
         required: true
         type: string
 
@@ -99,7 +99,10 @@ jobs:
 
           verify(os.environ['WINDOWS_RUN_ID'], 'windows-x64',
                  ('release-windows-x64', 'release-qt-dependency-sources'))
-          verify(os.environ['LINUX_RUN_ID'], 'linux-x86_64', ('release-linux-x86_64',))
+          linux_artifacts = ('release-linux-x86_64',)
+          if tag != 'v1.0.0-pre.4':
+              linux_artifacts += ('release-qt-wayland-source',)
+          verify(os.environ['LINUX_RUN_ID'], 'linux-x86_64', linux_artifacts)
           PY
 
       - name: Download verified Windows runtime
@@ -126,11 +129,29 @@ jobs:
           github-token: ${{ github.token }}
           path: release-assets
 
+      - name: Download matching Qt Wayland dependency source
+        if: ${{ inputs.tag != 'v1.0.0-pre.4' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-qt-wayland-source
+          run-id: ${{ inputs.linux_run_id }}
+          github-token: ${{ github.token }}
+          path: release-assets
+
       - name: Checkout public release tools
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           path: release-tools
           persist-credentials: false
+
+      - name: Prepare static AppImage inspection
+        if: ${{ inputs.tag != 'v1.0.0-pre.4' }}
+        run: |
+          if ! command -v unsquashfs >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends squashfs-tools
+          fi
+          command -v unsquashfs
 
       - name: Verify packages and publish two downloads
         env:

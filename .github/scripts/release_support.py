@@ -9,13 +9,27 @@ QT_SOURCE_ARCHIVES = {
     "qtsvg-everywhere-src-6.8.3.zip": (2651981, "90643c1ba05245abedc2bcd9d4f745568dc27a1b37dd3ba861fd19d8ac6a7c46"),
     "qtimageformats-everywhere-src-6.8.3.zip": (2999913, "30b81e4f641cdbd608ae8c01a48677338d1c69545117c5552063b63262c7eb1b"),
 }
+LEGACY_LINUX_TAGS = frozenset({"v1.0.0-pre.4"})
+QT_WAYLAND_ARCHIVE = {
+    "qtwayland-everywhere-src-6.8.3.zip": (2148676, "4c2773404c4aeaac1963ef0aecd858e0f58ca07ee7689d4c785dd17fe5611ef6"),
+}
+WAYLAND_SOURCE_ARCHIVE = QT_WAYLAND_ARCHIVE
 
 
 def runtime_names(tag):
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+", tag):
         raise ValueError("A prerelease tag is required")
+    suffix = "tar.gz" if tag in LEGACY_LINUX_TAGS else "AppImage"
     return (f"LittleCraftLauncher-{tag}-windows-x64.zip",
-            f"LittleCraftLauncher-{tag}-linux-x86_64.tar.gz")
+            f"LittleCraftLauncher-{tag}-linux-x86_64.{suffix}")
+
+
+def dependency_archives(tag):
+    """Keep the published pre.4 inputs frozen; Wayland starts with AppImage."""
+    runtime_names(tag)
+    return dict(QT_SOURCE_ARCHIVES) if tag in LEGACY_LINUX_TAGS else {
+        **QT_SOURCE_ARCHIVES, **QT_WAYLAND_ARCHIVE,
+    }
 
 
 def release_notes(repository, tag, hashes, changes=None):
@@ -27,10 +41,12 @@ def release_notes(repository, tag, hashes, changes=None):
         raise ValueError("Both runtime checksums are required")
     base = f"https://github.com/{repository}/releases/download/{tag}"
     intro = (changes or "用于测试的预发布版本，欢迎反馈使用中遇到的问题。").strip()
+    linux_start = ("解压后运行 `./LittleCraftLauncher`" if tag in LEGACY_LINUX_TAGS else
+                   "添加执行权限后运行 AppImage（X11 / Wayland）")
     lines = [intro, "", "## 下载", "",
              "| 平台 | 下载 | 启动方式 |", "| --- | --- | --- |",
              f"| Windows 10/11 x64 | [Windows ZIP]({base}/{windows}) | 完整解压后运行 `mclauncher-qt.exe` |",
-             f"| Linux x86_64 · Ubuntu 22.04+ | [Linux 实验预览]({base}/{linux}) | 解压后运行 `./LittleCraftLauncher` |",
+             f"| Linux x86_64 · Ubuntu 22.04+ | [Linux 实验预览]({base}/{linux}) | {linux_start} |",
              "", "## 当前限制", "",
              "- Microsoft 登录暂不可用；LittleSkin 已配置。",
              "- Linux 暂不支持游戏启动、在线凭据保存和托管 Java 下载。",
@@ -45,7 +61,7 @@ def release_notes(repository, tag, hashes, changes=None):
               "", "对应 Qt 6.8.3 的官方源码归档如下；使用启动器无需下载：", "",
               "| Qt 依赖源码 | SHA-256 |", "| --- | --- |"]
     lines += [f"| [{name}]({QT_SOURCE_BASE_URL}{name}) | `{digest}` |"
-              for name, (_, digest) in QT_SOURCE_ARCHIVES.items()]
+              for name, (_, digest) in dependency_archives(tag).items()]
     lines += ["", "启动器源码暂未公开。GitHub 自动生成的 `Source code` 压缩包只包含此公开仓库的介绍和发布工具。",
               "", "</details>", ""]
     return "\n".join(lines)
@@ -64,6 +80,6 @@ def verify_published_assets(tag, assets, body):
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
                 or f"| {item['name']} | `{digest[7:]}` |" not in body):
             raise ValueError("A runtime upload or its published checksum is incomplete")
-    for name, (_, digest) in QT_SOURCE_ARCHIVES.items():
+    for name, (_, digest) in dependency_archives(tag).items():
         if f"({QT_SOURCE_BASE_URL}{name})" not in body or f"`{digest}`" not in body:
             raise ValueError("Matching dependency-source acquisition details are missing")

@@ -189,7 +189,7 @@ jobs:
           tag: ${{ inputs.tag }}
           source_ref: ${{ inputs.source_ref }}
 
-      - name: Restore the four pinned public Qt source archives
+      - name: Restore the five pinned public Qt source archives
         id: qt-source-archives
         continue-on-error: true
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -199,14 +199,15 @@ jobs:
             source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
             source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
             source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
-          key: qt-6.8.3-public-source-archives-a32f9f88e9c283c326cb94a3c1006ebdaf817d20a471da555995ae051a17fa44
+            source/qt-native/.tools/downloads/qtwayland-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-linux-source-archives-wayland-4c2773404c4a
           restore-keys: qt-6.8.3-public-source-archives-
           enableCrossOsArchive: true
 
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ninja-build libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
+          sudo apt-get install -y --no-install-recommends ninja-build patchelf squashfs-tools weston x11-utils libwayland-client0 libwayland-cursor0 libwayland-egl1 libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
 
       - name: Pin Linux Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -219,7 +220,7 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/qt-linux
-          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v2
+          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v3-wayland
 
       - name: Install Linux Qt 6.8.3
         if: steps.linux-qt.outputs.cache-hit != 'true'
@@ -236,7 +237,7 @@ jobs:
           PY
           python -m pip install 'aqtinstall==3.3.0'
           # QtSvg is part of the base Qt 6.8.3 archive set, not an addon module.
-          python -m aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats --archives qtbase qtdeclarative qtsvg icu -O "$RUNNER_TEMP/qt-linux"
+          python -m aqt install-qt linux desktop 6.8.3 linux_gcc_64 -m qtimageformats --archives qtbase qtdeclarative qtsvg icu qtwayland -O "$RUNNER_TEMP/qt-linux"
 
       - name: Verify public Linux SDK version and required modules
         run: |
@@ -248,7 +249,25 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/qt-linux
-          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v2
+          key: linux-x86_64-qt-6.8.3-gcc64-runtime-modules-v3-wayland
+
+      - name: Restore pinned public Linux deployment tools
+        id: linux-tools
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/linuxdeploy-tools
+          key: linuxdeploy-x86_64-${{ hashFiles('builder/.github/scripts/linux_toolchain.py') }}
+
+      - name: Verify pinned Linux deployment tools
+        run: python3 builder/.github/scripts/fetch-linux-tools.py --tool-dir "$RUNNER_TEMP/linuxdeploy-tools"
+
+      - name: Save verified public Linux deployment tools
+        if: steps.linux-tools.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/linuxdeploy-tools
+          key: linuxdeploy-x86_64-${{ hashFiles('builder/.github/scripts/linux_toolchain.py') }}
 
       - name: Build, test and package Linux privately
         id: linux-package
@@ -265,10 +284,9 @@ jobs:
             export QT_PLUGIN_PATH="$qt_root/plugins"
             export QML_IMPORT_PATH="$qt_root/qml"
             export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QML_DISABLE_DISK_CACHE=1
-            # PowerShell must not consume the remaining Bash here-document as
-            # pipeline input. Verify the legal inputs before an expensive build.
-            pwsh -NoLogo -NoProfile -NonInteractive -File source/qt-native/scripts/fetch-qt-license-sources.ps1 -Run </dev/null
-            python builder/.github/scripts/verify-cache-inputs.py --kind qt-source-archives --source-root "$GITHUB_WORKSPACE/source"
+            # Keep public dependency acquisition separate from private app inputs.
+            python builder/.github/scripts/fetch-linux-tools.py --tool-dir "$RUNNER_TEMP/linuxdeploy-tools" --source-root "$GITHUB_WORKSPACE/source"
+            python builder/.github/scripts/verify-cache-inputs.py --kind qt-source-archives --source-root "$GITHUB_WORKSPACE/source" --include-wayland
             echo 'legal_archives_verified=true' >> "$GITHUB_OUTPUT"
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF \
@@ -276,12 +294,12 @@ jobs:
             cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel "$build_jobs"
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
               --build-dir "$RUNNER_TEMP/build-linux" --qt-root "$qt_root" \
-              --output-dir "$RUNNER_TEMP/release-assets" --tag "$VERSION_TAG"
+              --output-dir "$RUNNER_TEMP/release-assets" --tag "$VERSION_TAG" --tool-dir "$RUNNER_TEMP/linuxdeploy-tools"
             if ! python builder/.github/scripts/smoke-linux.py \
-              --archive "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"; then
-              runtime_archive="$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.tar.gz"
+              --archive "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.AppImage" --tag "$VERSION_TAG" --backend both; then
+              runtime_archive="$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.AppImage"
               if test "$(stat -c %s "$runtime_archive")" -le 104857600; then
-                cp "$runtime_archive" "$RUNNER_TEMP/private-build-logs/runtime-package.tar.gz"
+                cp "$runtime_archive" "$RUNNER_TEMP/private-build-logs/runtime-package.AppImage"
               fi
               exit 1
             fi
@@ -296,7 +314,7 @@ jobs:
           fi
           echo 'Linux build, local tests and extracted-package startup check passed.'
 
-      - name: Save only the four verified public Qt source archives
+      - name: Save only the five verified public Qt source archives
         if: always() && steps.qt-source-archives.outputs.cache-hit != 'true' && steps.linux-package.outputs.legal_archives_verified == 'true'
         continue-on-error: true
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -306,7 +324,8 @@ jobs:
             source/qt-native/.tools/downloads/qtdeclarative-everywhere-src-6.8.3.zip
             source/qt-native/.tools/downloads/qtsvg-everywhere-src-6.8.3.zip
             source/qt-native/.tools/downloads/qtimageformats-everywhere-src-6.8.3.zip
-          key: qt-6.8.3-public-source-archives-a32f9f88e9c283c326cb94a3c1006ebdaf817d20a471da555995ae051a17fa44
+            source/qt-native/.tools/downloads/qtwayland-everywhere-src-6.8.3.zip
+          key: qt-6.8.3-linux-source-archives-wayland-4c2773404c4a
           enableCrossOsArchive: true
 
       - name: Encrypt private diagnostics
@@ -340,7 +359,17 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-linux-x86_64
-          path: ${{ runner.temp }}/release-assets/LittleCraftLauncher-${{ inputs.tag }}-linux-x86_64.*
+          path: ${{ runner.temp }}/release-assets/LittleCraftLauncher-${{ inputs.tag }}-linux-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Retain verified Qt Wayland source input
+        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-qt-wayland-source
+          path: source/qt-native/.tools/downloads/qtwayland-everywhere-src-6.8.3.zip
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
@@ -367,6 +396,13 @@ jobs:
         with:
           path: release-tools
           persist-credentials: false
+
+      - name: Prepare static AppImage inspection
+        run: |
+          if ! command -v unsquashfs >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends squashfs-tools
+          fi
 
       - name: Verify packages and publish two downloads
         env:

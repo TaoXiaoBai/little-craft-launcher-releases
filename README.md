@@ -31,6 +31,14 @@ Windows 10/11 x64 · Twelve themes · Qt 6.8 / C++20 / QML
 
 Minecraft, Java and account credentials are not bundled.
 
+### Linux interface preview
+
+The published `v1.0.0-pre.4` uses a TAR archive. Extract the whole archive and use its `LittleCraftLauncher` launcher script; starting the inner ELF directly can bypass its runtime setup. Reports of missing Qt platform plugins are being addressed in the packaging pipeline.
+
+The updated pipeline produces one Linux x86_64 AppImage, alongside the Windows ZIP. It is not published yet. For a release that provides an AppImage, give it execute permission and run it. Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. It targets Ubuntu 22.04 or newer and an X11/XWayland or Wayland desktop; Qt is bundled, while graphics drivers and desktop services come from the system.
+
+Linux remains an experimental interface preview. Game launch, online credential storage and managed Java installation need further platform work; the AppImage packaging change does not enable those features.
+
 ## What it does
 
 | What you need | What the launcher provides |

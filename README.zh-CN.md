@@ -31,6 +31,14 @@ Windows 10/11 x64 · 十二套主题 · Qt 6.8 / C++20 / QML
 
 启动器不附带 Minecraft、Java 或账号凭据。
 
+### Linux 界面预览
+
+已发布的 `v1.0.0-pre.4` 使用 TAR 压缩包。请完整解压并运行其中的 `LittleCraftLauncher` 启动脚本；直接运行内部 ELF 可能绕过运行库配置。收到的 Qt 平台插件缺失反馈正在打包流程中修复。
+
+更新后的流程将生成一个 Linux x86_64 AppImage，与 Windows ZIP 一起提供，目前尚未发布。下载提供 AppImage 的版本后，赋予执行权限即可运行。没有 FUSE 时，可执行 `./LittleCraftLauncher-<版本>-linux-x86_64.AppImage --appimage-extract`，再运行 `./squashfs-root/AppRun`。需要 Ubuntu 22.04 或更新版本及 X11/XWayland 或 Wayland 桌面；包内附带 Qt，显卡驱动和桌面服务由系统提供。
+
+Linux 仍是界面实验预览。游戏启动、在线凭据保存和托管 Java 安装还需要单独适配，改用 AppImage 不会自动补齐这些功能。
+
 ## 能帮你做什么
 
 | 你想做的事 | 启动器如何帮忙 |
