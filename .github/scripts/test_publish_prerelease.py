@@ -359,6 +359,16 @@ class ReleaseNotesTests(unittest.TestCase):
             self.assertIn(f"({SUPPORT.QT_SOURCE_BASE_URL}{name})", sources)
             self.assertIn(f"`{digest}`", sources)
 
+    def test_pre4_notes_remain_byte_for_byte_frozen(self):
+        fixtures = (
+            (None, "635973fa6f26fa156c0d2d364b3ee3a0e3a307653af1219c5db420de6f93facb"),
+            ("仅整理下载附件，应用二进制保持原样。", "4b76660d1907be4cca6b3372ba3b49342be3a66ba86668b1b7b7090fa2da813f"),
+        )
+        for changes, expected in fixtures:
+            with self.subTest(changes=changes):
+                body = SUPPORT.release_notes(REPOSITORY, TAG, self.hashes, changes)
+                self.assertEqual(hashlib.sha256(body.encode("utf-8")).hexdigest(), expected)
+
     def test_actual_change_intro_is_used_without_inventing_ui_upgrades(self):
         changes = "仅整理下载附件，应用二进制保持原样。"
         body = SUPPORT.release_notes(REPOSITORY, TAG, self.hashes, changes)
@@ -384,6 +394,24 @@ class ReleaseNotesTests(unittest.TestCase):
             self.assertIn(f"`{digest}`", body)
         self.assertIn("X11 / Wayland", body)
         self.assertNotIn("qtwayland-everywhere", SUPPORT.release_notes(REPOSITORY, TAG, self.hashes))
+
+    def test_pre5_describes_linux_capabilities_and_keyring_requirements(self):
+        tag = "v1.0.0-pre.5"
+        windows, linux = SUPPORT.runtime_names(tag)
+        hashes = {windows: "a" * 64, linux: "b" * 64}
+        body = SUPPORT.release_notes(REPOSITORY, tag, hashes)
+        primary = body.split("<details>", 1)[0]
+        self.assertIn("Linux x86_64 游戏启动", primary)
+        self.assertIn("Java 8/17/21/25", primary)
+        self.assertIn("Secret Service", primary)
+        self.assertIn("不回退明文", primary)
+        self.assertIn("无法解锁、取消或超时", primary)
+        self.assertIn("Microsoft 登录仍等待项目客户端配置及相关服务准入", primary)
+        self.assertNotIn("Linux 暂不支持游戏启动", body)
+        self.assertNotIn("Linux 实验预览", body)
+        self.assertNotIn(hashes[windows], primary)
+        self.assertNotIn(SUPPORT.QT_SOURCE_BASE_URL, primary)
+        self.assertEqual(len(SUPPORT.runtime_names(tag)), 2)
 
 
 def elf_header(appimage=False):

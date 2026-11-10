@@ -207,7 +207,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ninja-build patchelf squashfs-tools weston x11-utils libwayland-client0 libwayland-cursor0 libwayland-egl1 libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
+          sudo apt-get install -y --no-install-recommends ninja-build patchelf squashfs-tools weston x11-utils dbus-x11 libwayland-client0 libwayland-cursor0 libwayland-egl1 libgl1-mesa-dev libegl1 libopengl0 libfontconfig1 libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-randr0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xkb1 libxrender1 libdbus-1-3 libssl3 fonts-noto-cjk xvfb xauth
 
       - name: Pin Linux Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0

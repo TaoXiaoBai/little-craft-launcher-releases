@@ -76,7 +76,7 @@ def linux_qt_sdk(qt_root):
         raise ValueError("Unexpected public SDK version")
     ordinary(qt_root / "bin/qmake")
     libraries = [f"lib/libQt6{module}.so.6.8.3" for module in (
-        "Core", "Gui", "Network", "Qml", "QmlModels", "Quick", "QuickControls2",
+        "Core", "Gui", "Network", "DBus", "Qml", "QmlModels", "Quick", "QuickControls2",
         "QuickTemplates2", "Svg", "Test",
     )]
     libraries += [f"lib/libicu{module}.so.73.2" for module in ("data", "i18n", "uc")]

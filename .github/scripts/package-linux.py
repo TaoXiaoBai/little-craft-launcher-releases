@@ -88,7 +88,7 @@ def copy_runtime(qt_root: Path, stage: Path) -> None:
     version = ordinary_file(qt_root / "lib/cmake/Qt6Core/Qt6CoreConfigVersionImpl.cmake").read_text(encoding="utf-8")
     require(re.search(r'set\(PACKAGE_VERSION\s+"?6\.8\.3"?\s*\)', version) is not None,
             "The Qt SDK version is not 6.8.3.")
-    for module in ("Core", "Gui", "Network", "Qml", "Quick", "QuickControls2"):
+    for module in ("Core", "Gui", "Network", "DBus", "Qml", "Quick", "QuickControls2"):
         require_elf(ordinary_file((qt_root / "lib" / f"libQt6{module}.so.6").resolve(strict=True)))
     for name in (*PLATFORM_PLUGINS, "libqoffscreen.so"):
         source = qt_root / "plugins/platforms" / name
@@ -113,6 +113,7 @@ def copy_runtime(qt_root: Path, stage: Path) -> None:
 def require_deployed_runtime(stage: Path) -> None:
     for required in (
         "usr/lib/libQt6Core.so.6", "usr/lib/libQt6Gui.so.6", "usr/lib/libQt6Network.so.6",
+        "usr/lib/libQt6DBus.so.6",
         "usr/lib/libQt6Qml.so.6", "usr/lib/libQt6Quick.so.6", "usr/lib/libQt6QuickControls2.so.6",
         "usr/plugins/platforms/libqxcb.so", "usr/plugins/platforms/libqoffscreen.so",
         "usr/plugins/platforms/libqwayland-generic.so", "usr/plugins/platforms/libqwayland-egl.so",
@@ -200,6 +201,13 @@ def write_documentation(stage: Path, tag: str) -> None:
     write_generated(stage / "AppRun",
         '#!/bin/sh\nset -eu\n'
         'bundle_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        'if [ "${LD_LIBRARY_PATH+x}" = x ]; then\n'
+        '  export MCL_HOST_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"\n'
+        'else unset MCL_HOST_LD_LIBRARY_PATH; fi\n'
+        'if [ "${LD_PRELOAD+x}" = x ]; then\n'
+        '  export MCL_HOST_LD_PRELOAD="$LD_PRELOAD"\n'
+        'else unset MCL_HOST_LD_PRELOAD; fi\n'
+        'export MCL_APPIMAGE_RUNTIME_ROOT="$bundle_dir"\n'
         # Only this child process is changed. Display, input-method settings and an
         # explicit QT_QPA_PLATFORM remain available to Qt's backend selection.
         'unset QT_PLUGIN_PATH QT_QPA_PLATFORM_PLUGIN_PATH QML_IMPORT_PATH QML2_IMPORT_PATH\n'
@@ -211,7 +219,7 @@ def write_documentation(stage: Path, tag: str) -> None:
         'export QML2_IMPORT_PATH="$bundle_dir/usr/qml"\n'
         'exec "$bundle_dir/usr/bin/mclauncher-qt" "$@"\n', 0o755)
     (stage / "README.txt").write_text(
-        f"Little Craft Launcher {tag} - Linux x86_64 experimental UI preview\n\n"
+        f"Little Craft Launcher {tag} - Linux x86_64 prerelease\n\n"
         "AppImage: chmod +x LittleCraftLauncher-*-linux-x86_64.AppImage, then run it.\n"
         "Without FUSE, run ./LittleCraftLauncher-*-linux-x86_64.AppImage --appimage-extract\n"
         "and start ./squashfs-root/AppRun.\n"
@@ -219,15 +227,25 @@ def write_documentation(stage: Path, tag: str) -> None:
         "Both XCB and Wayland Qt backends and their deployable dependencies are bundled;\n"
         "the operating system supplies glibc, graphics drivers and desktop services.\n"
         "An explicit QT_QPA_PLATFORM=xcb or QT_QPA_PLATFORM=wayland is supported.\n\n"
-        "This is a prerelease, unsigned experimental UI build. Linux online credential\n"
-        "storage, managed Java installation and Minecraft game launching are not supported\n"
-        "by this preview. The current game dependency resolver still targets Windows.\n"
-        "Use the Windows package for those workflows. This package does not contain Java,\n"
-        "Minecraft, mods, account data or private application sources.\n\n"
+        "Linux x86_64 supports native game dependencies and launch, local Java discovery\n"
+        "and Mojang managed Java 8/17/21/25 downloads. Game launch still requires a\n"
+        "permitted account and a matching Java runtime. Microsoft sign-in is awaiting\n"
+        "the project's public-client configuration and service access.\n"
+        "Online credentials use the desktop Secret Service keyring (for example GNOME\n"
+        "Keyring or a configured compatible provider). A missing, locked or unresponsive\n"
+        "keyring produces an error, without plaintext fallback. Credential storage is\n"
+        "scoped to the local user/keyring; moving profile files does not move credentials.\n"
+        "By default data stays in per-user application storage. --portable keeps data\n"
+        "beside the AppImage carrier, or at the root of a manually extracted AppDir.\n"
+        "This unsigned prerelease does not contain Java, Minecraft, mods, account data\n"
+        "or private application sources.\n\n"
         "启动：赋予 AppImage 执行权限后直接运行。没有 FUSE 时，用 --appimage-extract\n"
         "解包，再运行 squashfs-root/AppRun。需要 Ubuntu 22.04+ x86_64 和 X11/XWayland\n"
-        "或 Wayland 桌面。这是 Linux 界面实验预览，不支持在线凭据存储、受管 Java\n"
-        "安装或 Minecraft 游戏启动；游戏相关流程请使用 Windows 包。\n\n"
+        "或 Wayland 桌面。支持 Linux x86_64 游戏启动、本机 Java 检测及 Mojang 官方\n"
+        "Java 8/17/21/25 下载。启动仍需可用账号及匹配的 Java；Microsoft 登录尚待\n"
+        "本项目客户端配置与服务准入。在线凭据需要桌面 Secret Service 系统密钥环，\n"
+        "缺失、无法解锁或超时会明确失败，不回退明文保存。默认使用每用户数据目录；\n"
+        "--portable 将数据放在 AppImage 文件旁，手动解包时放在 AppDir 根目录。\n\n"
         "Qt 6.8.3 is dynamically linked and its libraries remain replaceable. License\n"
         "texts and third-party notices are under licenses/ and SUPPORTING_MATERIALS.zip.\n"
         "See DYNAMIC-RUNTIME.txt for dependency source locations and library replacement.\n",

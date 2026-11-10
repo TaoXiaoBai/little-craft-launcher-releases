@@ -42,7 +42,7 @@ class Fixture:
         put(self.source / "qt-native/src/branding/launcher-icon-256.png", b"png fixture")
         put(self.qt / "bin/qmake", b"qmake fixture", True)
         put(self.qt / "lib/cmake/Qt6Core/Qt6CoreConfigVersionImpl.cmake", b'set(PACKAGE_VERSION "6.8.3")\n')
-        for library in ("Core", "Gui", "Network", "Qml", "Quick", "QuickControls2"):
+        for library in ("Core", "Gui", "Network", "DBus", "Qml", "Quick", "QuickControls2"):
             put(self.qt / f"lib/libQt6{library}.so.6", ELF)
         for unused in ("PrintSupport", "Sql", "OpenGLWidgets"):
             put(self.qt / f"lib/libQt6{unused}.so.6", ELF)
@@ -89,7 +89,7 @@ class Fixture:
                 shutil.copyfile(icon, stage / icon.name)
                 # Simulate linuxdeploy's NEEDED closure and QML scanner output;
                 # unreferenced SDK modules remain outside the AppDir.
-                for library in ("Core", "Gui", "Network", "Qml", "Quick", "QuickControls2"):
+                for library in ("Core", "Gui", "Network", "DBus", "Qml", "Quick", "QuickControls2"):
                     PACKAGE.copy_file(self.qt / f"lib/libQt6{library}.so.6",
                                       stage / f"usr/lib/libQt6{library}.so.6")
                 PACKAGE.copy_file(self.qt / "lib/libicuuc.so.73.2", stage / "usr/lib/libicuuc.so.73.2")
@@ -122,6 +122,34 @@ class Fixture:
 
 
 class PackageLinuxTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "AppRun is a Linux shell entry point")
+    def test_real_apprun_preserves_host_library_environment_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            PACKAGE.write_documentation(stage, TAG)
+            keys = ("LD_LIBRARY_PATH", "LD_PRELOAD", "MCL_HOST_LD_LIBRARY_PATH",
+                    "MCL_HOST_LD_PRELOAD", "MCL_APPIMAGE_RUNTIME_ROOT", "QT_PLUGIN_PATH")
+            stub = ("#!/usr/bin/python3\nimport json, os\nprint(json.dumps({k: os.environ.get(k) "
+                    "for k in " + repr(keys) + "}))\n")
+            put(stage / "usr/bin/mclauncher-qt", stub.encode(), executable=True)
+            for original in (None, "", "/opt/host libraries"):
+                environment = {k: v for k, v in os.environ.items()
+                               if k not in keys and not k.startswith("MCL_HOST_")}
+                environment["MCL_HOST_LD_LIBRARY_PATH"] = "stale inherited backup"
+                environment["MCL_HOST_LD_PRELOAD"] = "stale inherited backup"
+                if original is not None:
+                    environment["LD_LIBRARY_PATH"] = original
+                    environment["LD_PRELOAD"] = ""  # Empty is distinct from absent.
+                result = subprocess.run([str(stage / "AppRun")], env=environment,
+                                        check=True, capture_output=True, text=True)
+                actual = json.loads(result.stdout)
+                self.assertEqual(actual["MCL_APPIMAGE_RUNTIME_ROOT"], str(stage))
+                self.assertEqual(actual["LD_LIBRARY_PATH"], str(stage / "usr/lib"))
+                self.assertEqual(actual["QT_PLUGIN_PATH"], str(stage / "usr/plugins"))
+                self.assertIsNone(actual["LD_PRELOAD"])
+                self.assertEqual(actual["MCL_HOST_LD_LIBRARY_PATH"], original)
+                self.assertEqual(actual["MCL_HOST_LD_PRELOAD"], None if original is None else "")
+
     def test_icu_soname_copy_retains_sdk_source_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
