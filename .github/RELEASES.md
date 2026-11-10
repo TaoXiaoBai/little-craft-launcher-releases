@@ -31,6 +31,12 @@ when manually dispatched on the default branch.
    `latest=false`; a failed upload leaves a draft, not a partial public release.
    A tag already associated with a release must not be reused.
 
+Windows and Linux software-rendered CI enable
+`MCL_SERIALIZE_SOFTWARE_UI=ON`. The full UI matrices share CTest's renderer
+resource lock, while `--parallel 2` still allows backend groups to run alongside
+one UI group. Each UI suite starts with its own empty QML compilation cache.
+All registered functions, data rows and assertions remain enabled. Linux software-rendering budgets include the complete 167-row UI regression and 183-row local UI matrix, including their final scroll walks and About-page rows.
+
 The existing `v1.0.0-pre.4` release is frozen. Verification and cleanup retain
 its Linux TAR and four-source-archive contract; they do not rewrite that release
 or require its historical package to acquire Qt Wayland. New prerelease tags

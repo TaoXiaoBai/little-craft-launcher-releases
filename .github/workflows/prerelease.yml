@@ -289,7 +289,7 @@ jobs:
             python builder/.github/scripts/verify-cache-inputs.py --kind qt-source-archives --source-root "$GITHUB_WORKSPACE/source" --include-wayland
             echo 'legal_archives_verified=true' >> "$GITHUB_OUTPUT"
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF \
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF -DMCL_SERIALIZE_SOFTWARE_UI=ON \
               -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root"
             cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel "$build_jobs"
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
