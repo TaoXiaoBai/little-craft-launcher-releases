@@ -313,7 +313,7 @@ jobs:
             # The already-packaged application stays in the same build tree.
             # Upload remains gated on every local test passing afterwards.
             cmake --build "$RUNNER_TEMP/build-linux" --parallel "$build_jobs"
-            ctest --test-dir "$RUNNER_TEMP/build-linux" --output-on-failure --no-tests=error --parallel 2
+            ctest --test-dir "$RUNNER_TEMP/build-linux" --output-on-failure --no-tests=error --stop-on-failure --parallel 2
           BUILD
           then
             echo '::error::Linux packaging failed. Raw diagnostics are not public; encrypted diagnostics are retained.'
