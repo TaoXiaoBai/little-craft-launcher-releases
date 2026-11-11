@@ -5,7 +5,10 @@
 param(
     [Parameter(Mandatory)][string]$SourceRoot,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [Parameter(Mandatory)][ValidatePattern('\Av[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9][A-Za-z0-9.-]{0,60}\z')][string]$VersionTag
+    [Parameter(Mandatory)][ValidatePattern('\Av[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9][A-Za-z0-9.-]{0,60}\z')][string]$VersionTag,
+    # A primary package remains private until its caller verifies the matching
+    # companion run. Never package a companion-only test selection.
+    [ValidateSet('full', 'primary')][string]$TestShard = 'full'
 )
 
 Set-StrictMode -Version Latest
@@ -141,7 +144,11 @@ if ($env:GITHUB_OUTPUT) { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "toolchai
 RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'fetch-qt-license-sources.ps1'), '-Run') 'qt-legal-materials'
 RunProgram $python @($cacheVerifier, '--kind', 'qt-source-archives', '--source-root', $source) 'verify-source-cache'
 if ($env:GITHUB_OUTPUT) { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "legal_archives_verified=true`n", [Text.UTF8Encoding]::new($false)) }
-RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-build-test.ps1'), '-Run', '-Mode', 'dynamic') 'build-and-all-local-tests' 100 @{ GITHUB_SHA = $sourceCommit }
+$testArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-build-test.ps1'), '-Run', '-Mode', 'dynamic')
+# Omitting the new parameter in full mode keeps generic use with older source
+# tags compatible. The sharded prerelease workflow checks support beforehand.
+if ($TestShard -ceq 'primary') { $testArguments += @('-TestShard', 'primary') }
+RunProgram $pwsh $testArguments 'build-and-local-tests' 100 @{ GITHUB_SHA = $sourceCommit }
 
 $qt = Ordinary (Join-Path $native '.tools/Qt/6.8.3/mingw_64') $true
 $mingw = Ordinary (Join-Path $native '.tools/Qt/Tools/mingw1310_64') $true
