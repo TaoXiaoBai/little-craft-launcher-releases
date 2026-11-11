@@ -1,0 +1,109 @@
+name: Benchmark Windows build scheduling
+run-name: Build-only Windows ON-OFF-ON comparison ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing immutable private prerelease tag'
+        required: true
+        type: string
+        default: v1.0.0-pre.8
+      source_ref:
+        description: 'Optional full SHA for reviewed test/CI-only changes; production inputs must match the tag'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-scheduling-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark-build-only:
+    name: Diagnostic Windows compiler scheduling only
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-2022
+    timeout-minutes: 70
+    steps:
+      - name: Checkout public benchmark tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Validate benchmark contracts before accessing private inputs
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_build_benchmark.ps1
+
+      - name: Prepare private source and verify immutable production inputs
+        uses: ./builder/.github/actions/prepare-source
+        with:
+          source_repository: ${{ secrets.SOURCE_REPOSITORY }}
+          source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
+          tag: ${{ inputs.tag }}
+          source_ref: ${{ inputs.source_ref }}
+
+      - name: Restore public Windows toolchain archives only
+        id: windows-archives
+        continue-on-error: true
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/mcl-ci-archives
+          key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
+
+      - name: Compare three fresh build-all compilations on this VM
+        id: benchmark
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-build-benchmark-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          & pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/benchmark-windows-build.ps1 `
+            -SourceRoot (Join-Path $env:GITHUB_WORKSPACE 'source') *> (Join-Path $logs 'orchestrator.log')
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error -ErrorAction Continue 'Build-only benchmark failed. Detailed logs are retained encrypted; no runtime package was produced.'
+            exit 1
+          }
+          Write-Output 'Build-only ON/OFF/ON comparison completed; this run is ineligible for release and executes no application tests.'
+
+      - name: Save only verified public toolchain archives
+        if: always() && steps.windows-archives.outputs.cache-hit != 'true' && steps.benchmark.outputs.toolchain_verified == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/mcl-ci-archives
+          key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
+
+      - name: Encrypt private compiler logs and Ninja scheduling metadata
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-build-benchmark-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          python builder/.github/scripts/encrypt-diagnostics.py `
+            --certificate builder/.github/scripts/diagnostics-certificate.pem --logs-dir $logs `
+            --output (Join-Path $env:RUNNER_TEMP 'windows-build-benchmark.p7m') --exclude-screenshots
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic encryption failed. No raw files will be uploaded.' }
+
+      - name: Retain encrypted compiler diagnostics only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: encrypted-windows-build-benchmark
+          path: ${{ runner.temp }}/windows-build-benchmark.p7m
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Retain sanitized build-only timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-build-benchmark-timings
+          path: ${{ runner.temp }}/windows-build-benchmark-summary.json
+          if-no-files-found: ignore
+          retention-days: 3
