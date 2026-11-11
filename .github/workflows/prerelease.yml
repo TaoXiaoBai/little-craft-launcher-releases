@@ -27,7 +27,9 @@ permissions:
 
 concurrency:
   group: launcher-prerelease-${{ inputs.tag }}-${{ inputs.platform || 'both' }}
-  cancel-in-progress: false
+  # A repeated single-platform test supersedes its older attempt. Keep a
+  # two-platform publication running so a test dispatch cannot interrupt it.
+  cancel-in-progress: ${{ inputs.platform == 'windows' || inputs.platform == 'linux' }}
 
 jobs:
   build-windows:
