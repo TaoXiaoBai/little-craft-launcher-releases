@@ -293,6 +293,54 @@ raise SystemExit(int(os.environ.get('FIXTURE_EXIT','0')))
             with self.subTest(name=name, key=key), self.assertRaises(runner.ShardError):
                 runner.collect_identities(malformed, self.source, self.build, self.cache)
 
+    def test_accepts_legacy_and_current_populated_ui_budgets(self):
+        for seconds in (120, 180):
+            registration = copy.deepcopy(self.registration)
+            test = next(t for t in registration['tests'] if t['name'] == 'populated_ui')
+            next(p for p in test['properties'] if p['name'] == 'TIMEOUT')['value'] = seconds
+            with self.subTest(seconds=seconds):
+                identities = runner.collect_identities(registration, self.source, self.build, self.cache)
+                self.assertEqual(len(identities), 44)
+
+    def test_primary_accepts_the_current_populated_ui_budget(self):
+        test = next(t for t in self.registration['tests'] if t['name'] == 'populated_ui')
+        next(p for p in test['properties'] if p['name'] == 'TIMEOUT')['value'] = 180
+        self.write_registration()
+        code, result = self.run_shard('primary')
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'PASS_PARTIAL_CURRENT_CTEST')
+        self.assertEqual(result['ctestValidation']['count'], 39)
+        self.assertIn('populated_ui', result['selectedTestGroups'])
+
+    def test_companion_accepts_the_current_populated_ui_budget(self):
+        test = next(t for t in self.registration['tests'] if t['name'] == 'populated_ui')
+        next(p for p in test['properties'] if p['name'] == 'TIMEOUT')['value'] = 180
+        self.write_registration()
+        code, result = self.run_shard('companion')
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'PASS_PARTIAL_CURRENT_CTEST')
+        self.assertEqual(result['ctestValidation']['count'], 5)
+        self.assertNotIn('populated_ui', result['selectedTestGroups'])
+
+    def test_rejects_unapproved_populated_ui_budgets(self):
+        for seconds in (119, 121, 179, 181, 0, -1, 120.5, '120', '180', None,
+                        True, float('nan'), float('inf')):
+            registration = copy.deepcopy(self.registration)
+            test = next(t for t in registration['tests'] if t['name'] == 'populated_ui')
+            next(p for p in test['properties'] if p['name'] == 'TIMEOUT')['value'] = seconds
+            with self.subTest(seconds=seconds), self.assertRaisesRegex(runner.ShardError, 'ALTERED_CTEST_PROPERTIES'):
+                runner.collect_identities(registration, self.source, self.build, self.cache)
+
+    def test_all_other_group_budgets_remain_exact(self):
+        for name in sorted(runner.EXPECTED_GROUPS - {'populated_ui'}):
+            expected = runner.TIMEOUTS[name]
+            for seconds in sorted({expected - 1, expected + 1, 120, 180} - {expected}):
+                registration = copy.deepcopy(self.registration)
+                test = next(t for t in registration['tests'] if t['name'] == name)
+                next(p for p in test['properties'] if p['name'] == 'TIMEOUT')['value'] = seconds
+                with self.subTest(name=name, seconds=seconds), self.assertRaisesRegex(runner.ShardError, 'ALTERED_CTEST_PROPERTIES'):
+                    runner.collect_identities(registration, self.source, self.build, self.cache)
+
     def test_rejects_linked_and_empty_test_binary(self):
         path = self.build/'auth_tests'
         path.unlink()
