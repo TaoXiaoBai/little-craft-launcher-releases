@@ -51,6 +51,13 @@ function Hash([string]$Path) {
     return (Get-FileHash -LiteralPath (Ordinary $Path) -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function CMakePath([string]$Path) {
+    # CMake writes compiler paths into generated .cmake files. Backslashes in
+    # Windows runner paths (for example D:\a\_temp) become invalid \a escapes.
+    # Inputs have already been validated by Ordinary; only normalize separators.
+    return $Path.Replace('\', '/')
+}
+
 function NewText([string]$Path, [string]$Value) {
     $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
@@ -424,12 +431,12 @@ if ($bundleRequired) {
     $ninja = Ordinary (Join-Path $native '.tools/Qt/Tools/Ninja/ninja.exe')
     $bundleBuild = Join-Path $stage 'bundle-build'
     $configure = @('-S', $bundleSource, '-B', $bundleBuild, '-G', 'Ninja',
-        "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_C_COMPILER=$(Ordinary (Join-Path $mingw 'bin/gcc.exe'))",
-        "-DCMAKE_CXX_COMPILER=$(Ordinary (Join-Path $mingw 'bin/g++.exe'))",
-        "-DCMAKE_RC_COMPILER=$(Ordinary (Join-Path $mingw 'bin/windres.exe'))",
+        "-DCMAKE_MAKE_PROGRAM=$(CMakePath $ninja)", "-DCMAKE_C_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'bin/gcc.exe')))",
+        "-DCMAKE_CXX_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'bin/g++.exe')))",
+        "-DCMAKE_RC_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'bin/windres.exe')))",
         '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF',
-        '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF', "-DMCL_BUNDLE_PAYLOAD=$archivePath",
-        "-DMCL_BUNDLE_INDEX=$bundleIndex", "-DMCL_BUNDLE_RELEASE_TAG=$VersionTag")
+        '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF', "-DMCL_BUNDLE_PAYLOAD=$(CMakePath $archivePath)",
+        "-DMCL_BUNDLE_INDEX=$(CMakePath $bundleIndex)", "-DMCL_BUNDLE_RELEASE_TAG=$VersionTag")
     RunProgram $cmake $configure 'bundle-configure' 5 @{ PATH = $toolPath }
     RunProgram $cmake @('--build', $bundleBuild, '--parallel', '2') 'bundle-build' 10 @{ PATH = $toolPath }
     RunProgram (Ordinary (Join-Path $native '.tools/Qt/Tools/CMake_64/bin/ctest.exe')) @('--test-dir', $bundleBuild, '--output-on-failure', '-C', 'Release') 'bundle-native-tests' 2 @{ PATH = $toolPath }
