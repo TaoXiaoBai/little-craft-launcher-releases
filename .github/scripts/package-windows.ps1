@@ -167,19 +167,25 @@ foreach ($required in @('mclauncher-qt.exe', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Ne
 # Only Qt's public SDK may supply loose QML/JS modules. Application resources
 # stay inside the binary; a relative application import must not become an
 # unintended loose source file in the distributable.
-$qmlExtensions = @('.qml', '.js', '.mjs', '.qmltypes', '.metainfo')
-$publicQmlHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $qt 'qml') -Recurse -File) {
-    if ($file.Name -ceq 'qmldir' -or $file.Extension.ToLowerInvariant() -in $qmlExtensions) {
-        $null = $publicQmlHashes.Add((Hash $file.FullName))
+function AssertPublicQmlFiles([string]$RuntimeDirectory, [string]$QtDirectory) {
+    $runtimeRoot = Ordinary $RuntimeDirectory $true
+    $sdkQmlRoot = Ordinary (Join-Path $QtDirectory 'qml') $true
+    $qmlExtensions = @('.qml', '.js', '.mjs', '.qmltypes', '.metainfo')
+    foreach ($file in Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File) {
+        if ($file.Name -cne 'qmldir' -and $file.Extension.ToLowerInvariant() -notin $qmlExtensions) { continue }
+        $relative = Relative $runtimeRoot $file.FullName
+        if (-not $relative.StartsWith('qml/', [StringComparison]::Ordinal)) {
+            throw 'A loose QML/JS file is outside the public Qt module directory.'
+        }
+        # Verify only deployed modules, at their exact public SDK paths. The
+        # complete unused SDK tree is neither hashed nor admitted by content.
+        $sdkFile = Join-Path $sdkQmlRoot $relative.Substring(4)
+        if ((Hash $file.FullName) -cne (Hash $sdkFile)) {
+            throw 'A loose QML/JS file did not originate from its public Qt SDK path.'
+        }
     }
 }
-foreach ($file in Get-ChildItem -LiteralPath $payload -Recurse -File) {
-    if (($file.Name -ceq 'qmldir' -or $file.Extension.ToLowerInvariant() -in $qmlExtensions) -and
-        -not $publicQmlHashes.Contains((Hash $file.FullName))) {
-        throw 'A loose QML/JS file did not originate from the public Qt SDK.'
-    }
-}
+AssertPublicQmlFiles $payload $qt
 
 # The source acquisition script extracts only public Qt legal material from
 # locked official archives; no application source or build evidence is copied.
@@ -268,14 +274,32 @@ function Inventory([string]$Directory) {
     }
     return @($result | Sort-Object path)
 }
-$records = @(Inventory $payload)
-NewText (Join-Path $payload 'runtime-manifest.json') ([ordered]@{
-    schema = 1; version = $VersionTag; platform = 'windows-x64'; qt = '6.8.3'; linkage = 'dynamic'
-    files = $records
-} | ConvertTo-Json -Depth 6)
-$records = @(Inventory $payload)
-NewText (Join-Path $payload 'SHA256SUMS.txt') (($records | ForEach-Object { $_.sha256 + '  ' + $_.path }) -join "`n")
-$records = @(Inventory $payload)
+function WriteRuntimeMetadata([string]$Directory, [string]$Tag) {
+    $records = @(Inventory $Directory)
+    $manifest = Join-Path $Directory 'runtime-manifest.json'
+    NewText $manifest ([ordered]@{
+        schema = 1; version = $Tag; platform = 'windows-x64'; qt = '6.8.3'; linkage = 'dynamic'
+        files = $records
+    } | ConvertTo-Json -Depth 6)
+    # Only the newly created manifest changed. Add its verified record rather
+    # than rehashing every DLL, QML module and license just to write the sums.
+    $records += [ordered]@{ path = 'runtime-manifest.json'; size = (Get-Item -LiteralPath (Ordinary $manifest)).Length; sha256 = (Hash $manifest) }
+    $records = @($records | Sort-Object path)
+    NewText (Join-Path $Directory 'SHA256SUMS.txt') (($records | ForEach-Object { $_.sha256 + '  ' + $_.path }) -join "`n")
+    # Retain the complete post-metadata inventory before compression, followed
+    # by fresh-extraction identity checks before and after the GUI smoke test.
+    $complete = @(Inventory $Directory)
+    $covered = @($complete | Where-Object { $_.path -cne 'SHA256SUMS.txt' })
+    if ($covered.Count -ne $records.Count) { throw 'Runtime files changed while writing metadata.' }
+    $expected = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    foreach ($record in $records) { $expected.Add($record.path, $record) }
+    foreach ($record in $covered) {
+        if (-not $expected.ContainsKey($record.path) -or $record.size -ne $expected[$record.path].size -or
+            $record.sha256 -cne $expected[$record.path].sha256) { throw 'Runtime metadata no longer matches its files.' }
+    }
+    return $complete
+}
+$records = @(WriteRuntimeMetadata $payload $VersionTag)
 $archiveName = 'LittleCraftLauncher-' + $VersionTag + '-windows-x64.zip'
 $archivePath = Join-Path $stage $archiveName
 [IO.Compression.ZipFile]::CreateFromDirectory($payload, $archivePath, [IO.Compression.CompressionLevel]::Optimal, $false)
