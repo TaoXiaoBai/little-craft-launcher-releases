@@ -27,7 +27,9 @@ permissions:
 
 concurrency:
   group: launcher-prerelease-${{ inputs.tag }}-${{ inputs.platform || 'both' }}
-  cancel-in-progress: false
+  # A repeated single-platform test supersedes its older attempt. Keep a
+  # two-platform publication running so a test dispatch cannot interrupt it.
+  cancel-in-progress: ${{ inputs.platform == 'windows' || inputs.platform == 'linux' }}
 
 jobs:
   build-windows:
@@ -41,6 +43,10 @@ jobs:
         with:
           path: builder
           persist-credentials: false
+
+      - name: Validate Windows packaging inventory rules
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_runtime_inventory.ps1
 
       - name: Prepare private source and verify release inputs
         uses: ./builder/.github/actions/prepare-source
