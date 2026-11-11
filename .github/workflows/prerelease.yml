@@ -44,6 +44,10 @@ jobs:
           path: builder
           persist-credentials: false
 
+      - name: Validate Windows packaging inventory rules
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_runtime_inventory.ps1
+
       - name: Prepare private source and verify release inputs
         uses: ./builder/.github/actions/prepare-source
         with:
