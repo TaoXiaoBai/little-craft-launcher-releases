@@ -360,6 +360,8 @@ $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
+$psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+$psi.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
 $psi.ArgumentList.Add('--data-root')
 $psi.ArgumentList.Add($dataRoot)
 foreach ($name in @($psi.Environment.Keys | Where-Object { $_ -match '^(QT|QML|MCL|MCLAUNCHER)' -or $_ -in @('SOURCE_REPOSITORY', 'SOURCE_READ_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN') })) {

@@ -106,6 +106,11 @@ function StartInfo([string]$Program, [string[]]$Arguments, [bool]$Diagnostics = 
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    # The Qt CLI writes UTF-8 JSON bytes. Windows' default redirected reader
+    # otherwise uses the OEM code page and corrupts Chinese paths before JSON
+    # and data-root comparisons. The GUI diagnostic reader uses this setup too.
+    $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     foreach ($argument in $Arguments) { $psi.ArgumentList.Add($argument) }
     foreach ($name in @($psi.Environment.Keys | Where-Object { $_ -match '^(QT|QML|MCL|MCLAUNCHER)' -or $_ -in @('SOURCE_REPOSITORY', 'SOURCE_READ_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN') })) {
         $null = $psi.Environment.Remove($name)
