@@ -25,6 +25,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 import release_support as SUPPORT
 import appimage_format as APPIMAGE
+import test_windows_bundle_format as WINDOWS_FIXTURE
 
 SPEC = importlib.util.spec_from_file_location(
     "publish_prerelease", SCRIPT_ROOT / "publish-prerelease.py"
@@ -607,12 +608,14 @@ class AppImageInspectionTests(unittest.TestCase):
 
 
 class AppImagePublishTests(unittest.TestCase):
+    release_tag = "v1.0.0-pre.5"
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="appimage publisher fixture-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         legacy = ArchiveFixture(self.root)
-        self.tag = "v1.0.0-pre.5"
+        self.tag = self.release_tag
         self.windows, self.linux = SUPPORT.runtime_names(self.tag)
         manifest = json.loads(legacy.windows_entries[0][1])
         manifest["version"] = self.tag
@@ -662,6 +665,95 @@ class AppImagePublishTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
         runner.assert_not_called()
+
+
+class LastLegacyWindowsPublishTests(AppImagePublishTests):
+    """The previously published pre.9 still takes its frozen deployment path."""
+    release_tag = "v1.0.0-pre.9"
+
+
+class OneFileWindowsPublishTests(AppImagePublishTests):
+    release_tag = "v1.0.0-pre.10"
+
+    def setUp(self):
+        super().setUp()
+        self.payload = WINDOWS_FIXTURE.build_runtime_payload(self.tag)
+        self.bundle = WINDOWS_FIXTURE.build_bundle(self.payload, self.tag)
+        self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT, self.bundle)])
+
+    def write_windows(self, entries):
+        (self.root / self.windows).write_bytes(WINDOWS_FIXTURE.zip_bytes(entries))
+
+    def assert_rejected_before_github(self):
+        runner = mock.Mock()
+        with self.assertRaises(ValueError):
+            PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
+        runner.assert_not_called()
+
+    def test_new_preview_cannot_silently_fall_back_to_legacy_windows_zip(self):
+        self.write_windows([
+            ("runtime-manifest.json", json.dumps({
+                "version": self.tag, "platform": "windows-x64", "linkage": "dynamic"}).encode()),
+            ("mclauncher-qt.exe", WINDOWS_FIXTURE.build_pe()),
+            ("SUPPORTING_MATERIALS.zip", tiny_zip([("NOTICE.txt", b"legal")])),
+        ])
+        self.assert_rejected_before_github()
+
+    def test_single_inner_executable_without_embedded_runtime_is_rejected(self):
+        self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT, WINDOWS_FIXTURE.build_pe())])
+        self.assert_rejected_before_github()
+
+    def test_top_level_sidecars_directories_and_links_are_rejected(self):
+        link = zipfile.ZipInfo("linked.exe")
+        link.create_system = 3
+        link.external_attr = 0o120777 << 16
+        for extra in (("Qt6Core.dll", b"unexpected sidecar"), ("runtime/", b""),
+                      ("private-source.zip", b"unpublished"), (link, b"mclauncher-qt.exe")):
+            with self.subTest(name=str(extra[0])):
+                self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT, self.bundle), extra])
+                self.assert_rejected_before_github()
+
+    def test_non_system_stub_imports_and_wrong_release_identity_are_rejected(self):
+        for bundle in (WINDOWS_FIXTURE.build_bundle(self.payload, self.tag, imports=("Qt6Core.dll",)),
+                       WINDOWS_FIXTURE.build_bundle(tag="v1.0.0-pre.11")):
+            with self.subTest(digest=hashlib.sha256(bundle).hexdigest()):
+                self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT, bundle)])
+                self.assert_rejected_before_github()
+
+    def test_payload_inventory_manifest_checksums_and_legal_material_are_verified(self):
+        cases = [
+            WINDOWS_FIXTURE.build_runtime_payload(self.tag, manifest_overrides={"linkage": "static"}),
+            WINDOWS_FIXTURE.build_runtime_payload(self.tag, sums_override=b"0" * 64 + b"  nonexistent.dll\n"),
+            WINDOWS_FIXTURE.build_runtime_payload(self.tag, overrides={"SUPPORTING_MATERIALS.zip": b"not a zip"}),
+            WINDOWS_FIXTURE.build_runtime_payload(self.tag, overrides={"platforms/qwindows.dll": None}),
+        ]
+        for payload in cases:
+            with self.subTest(digest=hashlib.sha256(payload).hexdigest()):
+                # The independent encoder supplies valid PE and outer hashes;
+                # publication must still inspect the actual inner inventory.
+                self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT,
+                                     WINDOWS_FIXTURE.build_bundle(payload, self.tag))])
+                self.assert_rejected_before_github()
+
+    def test_replaced_payload_is_rejected_even_with_valid_inner_metadata(self):
+        index = WINDOWS_FIXTURE.reference_index(self.payload, self.tag)
+        changed = WINDOWS_FIXTURE.build_runtime_payload(self.tag, overrides={"Qt6Core.dll": b"changed valid runtime"})
+        self.write_windows([(WINDOWS_FIXTURE.ENTRYPOINT,
+                             WINDOWS_FIXTURE.build_bundle(changed, self.tag, index=index))])
+        self.assert_rejected_before_github()
+
+    def test_onefile_inspection_never_executes_the_uploaded_windows_program(self):
+        with mock.patch.object(PUBLISH.subprocess, "run", side_effect=AssertionError("Do not execute a runtime")):
+            hashes = PUBLISH.validate_inputs(self.root, self.tag)
+        self.assertEqual(set(hashes), {self.windows, self.linux})
+
+    def test_uploaded_onefile_digest_must_match_locally_validated_bytes(self):
+        hashes = PUBLISH.validate_inputs(self.root, self.tag)
+        runner = MockGitHub(hashes, tag=self.tag,
+                            mutate=lambda release: release["assets"][0].update(digest="sha256:" + "0" * 64))
+        with self.assertRaises(ValueError):
+            PUBLISH.publish(REPOSITORY, self.tag, self.root, TARGET, run=runner)
+        self.assertEqual(runner.edits, [])
 
 
 class BoundedReaderTests(unittest.TestCase):

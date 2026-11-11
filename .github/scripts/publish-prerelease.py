@@ -12,7 +12,9 @@ import tempfile
 import zipfile
 
 from appimage_format import inspect_appimage
-from release_support import LEGACY_LINUX_TAGS, dependency_archives, release_notes, runtime_names, verify_published_assets
+from release_support import (LEGACY_LINUX_TAGS, dependency_archives, release_notes,
+                             runtime_names, verify_published_assets, windows_bundle_required)
+from windows_bundle_format import inspect_windows_zip
 
 
 def checksum(path):
@@ -43,20 +45,24 @@ def validate_inputs(root, tag):
         path = root / name
         if path.stat().st_size != size or checksum(path) != digest:
             raise ValueError("A Qt dependency archive differs from its pinned upstream bytes")
-    with zipfile.ZipFile(root / windows) as archive:
-        names = archive.namelist()
-        if len(names) != len(set(names)):
-            raise ValueError("Duplicate Windows runtime entries")
-        for name in names:
-            safe_path(name)
-        manifest = json.loads(archive.read("runtime-manifest.json"))
-        if (manifest.get("version") != tag or manifest.get("platform") != "windows-x64"
-                or manifest.get("linkage") != "dynamic"):
-            raise ValueError("Windows runtime identity differs from this release")
-        for name in ("mclauncher-qt.exe", "SUPPORTING_MATERIALS.zip"):
-            info = archive.getinfo(name)
-            if info.is_dir() or info.file_size == 0:
-                raise ValueError("Windows runtime package is incomplete")
+    if windows_bundle_required(tag):
+        inspect_windows_zip(root / windows, tag)
+    else:
+        # Historical downloads and metadata remain accepted byte-for-byte.
+        with zipfile.ZipFile(root / windows) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                raise ValueError("Duplicate Windows runtime entries")
+            for name in names:
+                safe_path(name)
+            manifest = json.loads(archive.read("runtime-manifest.json"))
+            if (manifest.get("version") != tag or manifest.get("platform") != "windows-x64"
+                    or manifest.get("linkage") != "dynamic"):
+                raise ValueError("Windows runtime identity differs from this release")
+            for name in ("mclauncher-qt.exe", "SUPPORTING_MATERIALS.zip"):
+                info = archive.getinfo(name)
+                if info.is_dir() or info.file_size == 0:
+                    raise ValueError("Windows runtime package is incomplete")
     if tag not in LEGACY_LINUX_TAGS:
         inspect_appimage(root / linux, tag)
     else:

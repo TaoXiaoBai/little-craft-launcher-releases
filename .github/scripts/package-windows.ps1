@@ -136,6 +136,12 @@ $sourceCommit = (& git -C $source rev-parse --verify HEAD)
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Could not identify the private source revision.' }
 $python = Ordinary (Get-Command python -CommandType Application -ErrorAction Stop).Source
 $cacheVerifier = Ordinary (Join-Path $PSScriptRoot 'verify-cache-inputs.py')
+# Use the publisher's version policy rather than silently changing old tags.
+$bundleFlag = Join-Path $stage 'windows-bundle-required.txt'
+RunProgram $python @('-c', 'import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from release_support import windows_bundle_required; Path(sys.argv[3]).write_text("yes" if windows_bundle_required(sys.argv[2]) else "no", encoding="ascii")', $PSScriptRoot, $VersionTag, $bundleFlag) 'bundle-version-policy' 1
+$bundlePolicy = [IO.File]::ReadAllText((Ordinary $bundleFlag))
+if ($bundlePolicy -cnotin @('yes', 'no')) { throw 'Invalid Windows bundle policy.' }
+$bundleRequired = $bundlePolicy -ceq 'yes'
 RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-bootstrap.ps1'), '-Run') 'bootstrap'
 RunProgram $python @($cacheVerifier, '--kind', 'windows-archives', '--source-root', $source, '--cache-root', (Join-Path $env:RUNNER_TEMP 'mcl-ci-archives')) 'verify-toolchain-cache'
 if ($env:GITHUB_OUTPUT) { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "toolchain_verified=true`n", [Text.UTF8Encoding]::new($false)) }
@@ -251,6 +257,11 @@ Microsoft login requires a project-authorized Client ID; this build retains the
 source revision's existing configuration. See the pre-release page for its status.
 The packaged GUI startup/close check does not verify Minecraft or live login.
 "@
+if ($bundleRequired) {
+    $notice = $notice.Replace(
+        'Extract this entire archive to a writable directory and run mclauncher-qt.exe.',
+        "The downloaded ZIP contains one mclauncher-qt.exe with its runtime embedded.`nExtract that EXE and run it; the full runtime is prepared in a per-user cache.`nThis does not change signing or SmartScreen reputation.`n`nFor compatible Qt library replacement or direct access to these materials, run:`n  mclauncher-qt.exe --extract-runtime <fresh-directory>`nKeep the extracted runtime DLLs and plugin/QML directories together, replace`ncompatible Qt libraries while closed, then run the extracted inner EXE directly.")
+}
 NewText (Join-Path $legal 'README.txt') $notice
 CopyLegalTree $legal $payload
 [IO.Compression.ZipFile]::CreateFromDirectory($legal, (Join-Path $payload 'SUPPORTING_MATERIALS.zip'), [IO.Compression.CompressionLevel]::Optimal, $false)
@@ -398,6 +409,47 @@ try {
     $process.Dispose()
 }
 
-CopyVerified $archivePath (Join-Path $output $archiveName)
+$finalArchive = $archivePath
+if ($bundleRequired) {
+    # Preserve the verified dynamic Qt deployment above as the complete embedded
+    # payload, including legal materials, inventory and checksums. Build only the
+    # small standalone bootstrap with the existing pinned native toolchain.
+    $bundleTools = Ordinary (Join-Path $PSScriptRoot 'windows_bundle_format.py')
+    $bundleSmoke = Ordinary (Join-Path $PSScriptRoot 'smoke-windows-bundle.ps1')
+    $bundleSource = Ordinary (Join-Path $native 'windows-bundle') $true
+    $bundleIndex = Join-Path $stage 'windows-bundle.index'
+    RunProgram $python @($bundleTools, 'create-index', '--payload', $archivePath, '--tag', $VersionTag, '--output', $bundleIndex) 'bundle-index' 5
+    $null = Ordinary $bundleIndex
+    $cmake = Ordinary (Join-Path $native '.tools/Qt/Tools/CMake_64/bin/cmake.exe')
+    $ninja = Ordinary (Join-Path $native '.tools/Qt/Tools/Ninja/ninja.exe')
+    $bundleBuild = Join-Path $stage 'bundle-build'
+    $configure = @('-S', $bundleSource, '-B', $bundleBuild, '-G', 'Ninja',
+        "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_C_COMPILER=$(Ordinary (Join-Path $mingw 'bin/gcc.exe'))",
+        "-DCMAKE_CXX_COMPILER=$(Ordinary (Join-Path $mingw 'bin/g++.exe'))",
+        "-DCMAKE_RC_COMPILER=$(Ordinary (Join-Path $mingw 'bin/windres.exe'))",
+        '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF',
+        '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF', "-DMCL_BUNDLE_PAYLOAD=$archivePath",
+        "-DMCL_BUNDLE_INDEX=$bundleIndex", "-DMCL_BUNDLE_RELEASE_TAG=$VersionTag")
+    RunProgram $cmake $configure 'bundle-configure' 5 @{ PATH = $toolPath }
+    RunProgram $cmake @('--build', $bundleBuild, '--parallel', '2') 'bundle-build' 10 @{ PATH = $toolPath }
+    RunProgram (Ordinary (Join-Path $native '.tools/Qt/Tools/CMake_64/bin/ctest.exe')) @('--test-dir', $bundleBuild, '--output-on-failure', '-C', 'Release') 'bundle-native-tests' 2 @{ PATH = $toolPath }
+    $outerExe = Ordinary (Join-Path $bundleBuild 'mclauncher-qt.exe')
+    RunProgram $python @($bundleTools, 'inspect', '--exe', $outerExe, '--tag', $VersionTag) 'bundle-pe-validation' 5
+    $oneFile = NewDirectory (Join-Path $stage 'single-executable')
+    CopyVerified $outerExe (Join-Path $oneFile 'mclauncher-qt.exe')
+    $finalArchive = Join-Path $stage 'single-executable.zip'
+    [IO.Compression.ZipFile]::CreateFromDirectory($oneFile, $finalArchive, [IO.Compression.CompressionLevel]::Optimal, $false)
+    RunProgram $python @($bundleTools, 'inspect-zip', '--archive', $finalArchive, '--tag', $VersionTag) 'bundle-final-zip-validation' 5
+    # Exercise the actual final ZIP extraction with only the outer executable.
+    $bundleExtracted = Join-Path $stage 'single-executable-extraction'
+    [IO.Compression.ZipFile]::ExtractToDirectory($finalArchive, $bundleExtracted)
+    if (@(Get-ChildItem -LiteralPath $bundleExtracted -Recurse -Force).Count -ne 1) { throw 'The single-executable ZIP contains extra files.' }
+    RunProgram $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $bundleSmoke,
+        '-Executable', (Ordinary (Join-Path $bundleExtracted 'mclauncher-qt.exe')),
+        '-PayloadDirectory', $payload, '-PayloadSha256', (Hash $archivePath),
+        '-StageDirectory', $stage, '-LogDirectory', $logs) 'bundle-independent-smoke' 15
+    VerifyExtraction
+}
+CopyVerified $finalArchive (Join-Path $output $archiveName)
 if (@(Get-ChildItem -LiteralPath $output -Force).Count -ne 1) { throw 'Release output contains an unexpected file.' }
 Write-Output 'Windows runtime archive verified: complete local tests and isolated packaged GUI startup/normal close passed.'
