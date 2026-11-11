@@ -193,7 +193,11 @@ def collect_identities(registration: object, source: Path, build: Path, cache: d
             kind = 'native-executable'
             files = [file_identity(executable)]
         props = properties(test)
-        if (props.get('TIMEOUT') != TIMEOUTS[name]
+        # Existing release tags use 120s; the populated-shell matrix with real
+        # theme-transition waits has a reviewed 180s budget. Keep every other
+        # group's timeout exact. The proof still binds the actual registration.
+        allowed_timeouts = (120, 180) if name == 'populated_ui' else (TIMEOUTS[name],)
+        if (props.get('TIMEOUT') not in allowed_timeouts
                 or props.get('WORKING_DIRECTORY') != str(build)):
             raise ShardError('ALTERED_CTEST_PROPERTIES')
         if name == 'linux_auth_vault' and props.get('ENVIRONMENT') != ['MCL_OWNED_KEYRING_TEST_BUS=1']:
