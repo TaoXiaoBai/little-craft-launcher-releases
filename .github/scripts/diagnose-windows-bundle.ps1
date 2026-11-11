@@ -16,7 +16,7 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or -not $env:RUNNER_TEM
 # without executing its bootstrap, full application build or publication path.
 $tokens = $null; $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'package-windows.ps1'), [ref]$tokens, [ref]$parseErrors)
-$required = @('Ordinary', 'NewDirectory', 'Hash', 'NewText', 'CopyVerified', 'RunProgram')
+$required = @('Ordinary', 'NewDirectory', 'Hash', 'CMakePath', 'NewText', 'CopyVerified', 'RunProgram')
 $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cin $required }, $true))
 if ($parseErrors.Count -or $functions.Count -ne $required.Count) { throw 'The reviewed packaging helpers are unavailable.' }
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
@@ -115,10 +115,10 @@ $payload = Join-Path $stage 'validated-pre9-payload'
 [IO.Compression.ZipFile]::ExtractToDirectory($inner, $payload)
 $build = Join-Path $stage 'bootstrap-build'
 RunProgram $cmake @('-S', (Ordinary (Join-Path $native 'windows-bundle') $true), '-B', $build, '-G', 'Ninja',
-    "-DCMAKE_MAKE_PROGRAM=$ninja", "-DCMAKE_C_COMPILER=$(Ordinary (Join-Path $mingw 'gcc.exe'))",
-    "-DCMAKE_CXX_COMPILER=$(Ordinary (Join-Path $mingw 'g++.exe'))", "-DCMAKE_RC_COMPILER=$(Ordinary (Join-Path $mingw 'windres.exe'))",
+    "-DCMAKE_MAKE_PROGRAM=$(CMakePath $ninja)", "-DCMAKE_C_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'gcc.exe')))",
+    "-DCMAKE_CXX_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'g++.exe')))", "-DCMAKE_RC_COMPILER=$(CMakePath (Ordinary (Join-Path $mingw 'windres.exe')))",
     '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF', '-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF',
-    "-DMCL_BUNDLE_PAYLOAD=$inner", "-DMCL_BUNDLE_INDEX=$index", "-DMCL_BUNDLE_RELEASE_TAG=$tag") 'bundle-configure' 3 @{ PATH = $toolPath }
+    "-DMCL_BUNDLE_PAYLOAD=$(CMakePath $inner)", "-DMCL_BUNDLE_INDEX=$(CMakePath $index)", "-DMCL_BUNDLE_RELEASE_TAG=$tag") 'bundle-configure' 3 @{ PATH = $toolPath }
 RunProgram $cmake @('--build', $build, '--parallel', '2') 'bundle-build' 5 @{ PATH = $toolPath }
 RunProgram (Ordinary (Join-Path $tools 'Tools/CMake_64/bin/ctest.exe')) @('--test-dir', $build, '--output-on-failure', '-C', 'Release') 'bundle-native-tests' 2 @{ PATH = $toolPath }
 $outer = Ordinary (Join-Path $build 'mclauncher-qt.exe')

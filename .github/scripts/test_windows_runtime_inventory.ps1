@@ -9,7 +9,7 @@ $tokens = $null; $parseErrors = $null
 $packageScript = Join-Path $PSScriptRoot 'package-windows.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($packageScript, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'The Windows packaging script did not parse.' }
-$required = @('Ordinary', 'Relative', 'Hash', 'NewText', 'AssertPublicQmlFiles', 'Inventory', 'WriteRuntimeMetadata')
+$required = @('Ordinary', 'Relative', 'Hash', 'CMakePath', 'NewText', 'AssertPublicQmlFiles', 'Inventory', 'WriteRuntimeMetadata')
 $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cin $required }, $true))
 if ($functions.Count -ne $required.Count) { throw 'The packaging test helpers are incomplete.' }
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
@@ -32,6 +32,11 @@ function Put([string]$Path, [string]$Contents) {
 $root = Join-Path ([IO.Path]::GetTempPath()) ('mcl-runtime-inventory-test-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($root)
 try {
+    # Regression: CMake's generated RC compiler module parsed D:\a as an
+    # invalid \a escape on the real Windows runner. Keep spaces/Unicode intact.
+    Check ((CMakePath 'D:\a\_temp\bundle-build\native-tools\windres.exe') -ceq 'D:/a/_temp/bundle-build/native-tools/windres.exe') 'A Windows RC compiler path retained CMake escape sequences.'
+    Check ((CMakePath 'D:\a\_temp\中文 with spaces\bundle.index') -ceq 'D:/a/_temp/中文 with spaces/bundle.index') 'CMake normalization changed spaces or Unicode.'
+    Check ((CMakePath 'D:/a/_temp/payload.zip') -ceq 'D:/a/_temp/payload.zip') 'A normalized CMake path changed.'
     $sdk = Join-Path $root 'sdk'
     $runtime = Join-Path $root 'runtime'
     foreach ($name in @('Button.qml', 'helper.js', 'helper.mjs', 'plugins.qmltypes', 'module.metainfo', 'qmldir')) {
