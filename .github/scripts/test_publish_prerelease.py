@@ -413,6 +413,42 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn(SUPPORT.QT_SOURCE_BASE_URL, primary)
         self.assertEqual(len(SUPPORT.runtime_names(tag)), 2)
 
+    def test_pre9_and_later_describe_configured_microsoft_login_without_claiming_approval(self):
+        for tag in ("v1.0.0-pre.9", "v1.0.0-pre.10", "v1.0.0-rc.1", "v1.0.1-pre.1"):
+            with self.subTest(tag=tag):
+                names = SUPPORT.runtime_names(tag)
+                hashes = dict(zip(names, ("a" * 64, "b" * 64)))
+                body = SUPPORT.release_notes(REPOSITORY, tag, hashes)
+                self.assertIn("Microsoft 登录已内置客户端配置", body)
+                self.assertIn("拥有 Minecraft Java 版的账号测试", body)
+                self.assertIn("Mojang 服务准入及实际登录结果仍待确认", body)
+                self.assertNotIn("仍等待项目客户端配置", body)
+                self.assertEqual(len(names), 2)
+                for name, checksum in hashes.items():
+                    self.assertIn(f"| {name} | `{checksum}` |", body)
+                for name in SUPPORT.dependency_archives(tag):
+                    self.assertIn(f"({SUPPORT.QT_SOURCE_BASE_URL}{name})", body)
+
+    def test_pre7_and_pre8_keep_their_historical_microsoft_wording(self):
+        for tag in ("v1.0.0-pre.7", "v1.0.0-pre.8"):
+            names = SUPPORT.runtime_names(tag)
+            body = SUPPORT.release_notes(REPOSITORY, tag, dict(zip(names, ("a" * 64, "b" * 64))))
+            self.assertIn("Microsoft 登录仍等待项目客户端配置及相关服务准入", body)
+            self.assertNotIn("Microsoft 登录已内置客户端配置", body)
+
+    def test_pre9_release_file_is_rendered_once_with_product_changes(self):
+        tag = "v1.0.0-pre.9"
+        changes = (SCRIPT_ROOT.parent / "release-notes" / (tag + ".md")).read_text(encoding="utf-8").strip()
+        names = SUPPORT.runtime_names(tag)
+        body = SUPPORT.release_notes(REPOSITORY, tag, dict(zip(names, ("a" * 64, "b" * 64))), changes)
+        self.assertTrue(body.startswith(changes + "\n"))
+        self.assertEqual(body.count(changes), 1)
+        self.assertIn("代表位置估算", body)
+        self.assertIn("跨午夜", body)
+        self.assertIn("减少动态效果", body)
+        self.assertNotIn("runner", changes)
+        self.assertNotIn("CI", changes)
+
 
 def elf_header(appimage=False):
     identity = bytearray(b"\x7fELF\x02\x01\x01" + bytes(9))
