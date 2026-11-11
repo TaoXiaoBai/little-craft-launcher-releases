@@ -52,7 +52,13 @@ jobs:
 
       - name: Validate Windows packaging inventory rules
         shell: pwsh
-        run: pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_runtime_inventory.ps1
+        run: |
+          pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_runtime_inventory.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows runtime inventory assertions failed.' }
+          pwsh -NoLogo -NoProfile -NonInteractive -File builder/.github/scripts/test_windows_bundle_smoke.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows independent bundle smoke assertions failed.' }
+          python -m unittest discover -s builder/.github/scripts -p test_release_support_bundle.py
+          if ($LASTEXITCODE -ne 0) { throw 'Versioned bundle release directions failed.' }
 
       - name: Prepare private source and verify release inputs
         uses: ./builder/.github/actions/prepare-source

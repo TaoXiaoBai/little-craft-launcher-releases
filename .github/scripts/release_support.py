@@ -24,6 +24,16 @@ def runtime_names(tag):
             f"LittleCraftLauncher-{tag}-linux-x86_64.{suffix}")
 
 
+def windows_bundle_required(tag):
+    """Keep released pre.1–pre.9 dynamic ZIPs frozen; require one EXE later."""
+    runtime_names(tag)
+    version, phase, sequence = re.fullmatch(
+        r"v([0-9]+\.[0-9]+\.[0-9]+)-(pre|alpha|beta|rc)\.([0-9]+)", tag).groups()
+    version = tuple(int(part) for part in version.split("."))
+    return version > (1, 0, 0) or (
+        version == (1, 0, 0) and (phase != "pre" or int(sequence) >= 10))
+
+
 def dependency_archives(tag):
     """Keep the published pre.4 inputs frozen; Wayland starts with AppImage."""
     runtime_names(tag)
@@ -55,6 +65,13 @@ def release_notes(repository, tag, hashes, changes=None):
     linux_start = ("解压后运行 `./LittleCraftLauncher`" if legacy else
                    "添加执行权限后运行 AppImage（X11 / Wayland）")
     linux_label = "Linux 实验预览" if legacy else "Linux AppImage"
+    bundled_windows = windows_bundle_required(tag)
+    windows_start = ("解压后运行唯一的 `mclauncher-qt.exe`（自带运行依赖）" if bundled_windows else
+                     "完整解压后运行 `mclauncher-qt.exe`")
+    materials_guidance = (
+        "Windows 单文件程序内含完整运行时；用 `mclauncher-qt.exe --extract-runtime <新目录>` 可提取运行时及 `SUPPORTING_MATERIALS.zip`，查看许可文本、第三方说明和 Qt 动态库替换方法。Linux 包内保留相同许可材料。"
+        if bundled_windows else
+        "包内 `SUPPORTING_MATERIALS.zip` 提供许可文本、第三方说明及 Qt 动态库替换方法。")
     guidance = (["- Microsoft 登录暂不可用；LittleSkin 已配置。",
                  "- Linux 暂不支持游戏启动、在线凭据保存和托管 Java 下载。",
                  "- Windows 程序尚未签名。"] if legacy else
@@ -62,9 +79,11 @@ def release_notes(repository, tag, hashes, changes=None):
                  "- Linux 在线凭据保存需要可用的系统密钥环（Secret Service）。密钥环不可用、无法解锁、取消或超时会提示失败，不回退明文。",
                  microsoft_guidance,
                  "- Windows 程序尚未签名。"])
+    if bundled_windows:
+        guidance += ["- Windows 依赖已内置，首次运行会自动准备到本机缓存。单文件封装不改变签名状态，仍可能出现 SmartScreen 的未知发布者提示。"]
     lines = [intro, "", "## 下载", "",
              "| 平台 | 下载 | 启动方式 |", "| --- | --- | --- |",
-             f"| Windows 10/11 x64 | [Windows ZIP]({base}/{windows}) | 完整解压后运行 `mclauncher-qt.exe` |",
+             f"| Windows 10/11 x64 | [Windows ZIP]({base}/{windows}) | {windows_start} |",
              f"| Linux x86_64 · Ubuntu 22.04+ | [{linux_label}]({base}/{linux}) | {linux_start} |",
              "", "## 当前限制" if legacy else "## 使用说明", "",
              *guidance, "",
@@ -74,7 +93,7 @@ def release_notes(repository, tag, hashes, changes=None):
     lines += [f"| {name} | `{hashes[name]}` |" for name in (windows, linux)]
     lines += ["", "</details>", "", "<details>",
               "<summary>第三方依赖与许可</summary>", "",
-              "包内 `SUPPORTING_MATERIALS.zip` 提供许可文本、第三方说明及 Qt 动态库替换方法。",
+              materials_guidance,
               "", "对应 Qt 6.8.3 的官方源码归档如下；使用启动器无需下载：", "",
               "| Qt 依赖源码 | SHA-256 |", "| --- | --- |"]
     lines += [f"| [{name}]({QT_SOURCE_BASE_URL}{name}) | `{digest}` |"
