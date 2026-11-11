@@ -194,6 +194,17 @@ function InvokeConcurrentCli([string]$Program, [object[]]$Invocations) {
         if ($cleanupFailed) { throw 'Concurrent smoke process cleanup or private logging failed.' }
     }
 }
+function AttachProcess([int]$ProcessId) {
+    $attached = [Diagnostics.Process]::GetProcessById($ProcessId)
+    try {
+        # GetProcessById alone is lazy. Retain a real queryable process handle
+        # while the child is alive, before the bootstrap releases its own handle
+        # at exit. The Process instance owns this SafeHandle until Dispose.
+        $handle = $attached.SafeHandle
+        if ($handle.IsInvalid -or $handle.IsClosed) { throw 'The GUI child process handle is unavailable.' }
+        return $attached
+    } catch { $attached.Dispose(); throw }
+}
 function ProcessSnapshot([Diagnostics.Process]$Process) {
     $snapshot = [ordered]@{ id = $null; hasExited = $null; exitCode = $null; exitCodeHex = $null; windowTitle = $null; windowVisible = $null; error = $null }
     if ($null -eq $Process) { return $snapshot }
@@ -202,8 +213,10 @@ function ProcessSnapshot([Diagnostics.Process]$Process) {
         $Process.Refresh()
         $snapshot.hasExited = $Process.HasExited
         if ($snapshot.hasExited) {
-            $snapshot.exitCode = $Process.ExitCode
-            $snapshot.exitCodeHex = '0x' + $Process.ExitCode.ToString('X8')
+            $code = $Process.ExitCode
+            if ($null -eq $code) { throw 'The exited process has no queryable exit code.' }
+            $snapshot.exitCode = $code
+            $snapshot.exitCodeHex = '0x' + $code.ToString('X8')
         } else {
             $snapshot.windowTitle = $Process.MainWindowTitle
             if ('BundleGuiWindow' -as [type]) { $snapshot.windowVisible = [BundleGuiWindow]::IsWindowVisible($Process.MainWindowHandle) }
@@ -345,7 +358,7 @@ try {
         if ($null -eq $line) { throw 'The wrapper closed stdout without reporting its child process.' }
         $null = $prefix.AppendLine($line)
         if ($line -cmatch '\ALCL_BUNDLE_CHILD_PID=([1-9][0-9]*)\z') {
-            $child = [Diagnostics.Process]::GetProcessById([int]$Matches[1])
+            $child = AttachProcess ([int]$Matches[1])
             break
         }
     }

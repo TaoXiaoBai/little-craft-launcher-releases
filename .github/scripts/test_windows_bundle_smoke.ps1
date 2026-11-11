@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'smoke-windows-bundle.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'The independent Windows smoke script did not parse.' }
-$required = @('Ordinary', 'Digest', 'CanonicalPath', 'SamePath', 'AssertRuntime', 'StartInfo', 'InvokeCli', 'InvokeConcurrentCli', 'ProcessSnapshot')
+$required = @('Ordinary', 'Digest', 'CanonicalPath', 'SamePath', 'AssertRuntime', 'StartInfo', 'InvokeCli', 'InvokeConcurrentCli', 'AttachProcess', 'ProcessSnapshot')
 $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cin $required }, $true))
 if ($functions.Count -ne $required.Count) { throw 'The independent smoke helpers are incomplete.' }
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
@@ -119,6 +119,40 @@ $out.Flush()
     $results = @(InvokeConcurrentCli $pwsh $pair)
     Check ($results.Count -eq 2 -and $results[0].dataRoot -ceq $pair[0].Root -and $results[1].dataRoot -ceq $pair[1].Root) 'Concurrent UTF-8 readers did not retain independent profiles.'
     Check ([IO.File]::Exists((Join-Path $root 'ready-0')) -and [IO.File]::Exists((Join-Path $root 'ready-1'))) 'Both processes did not cross the concurrent-start barrier.'
+
+    # Attach while alive and release the original owner's handle before exit,
+    # just as the bootstrap does. Both zero and nonzero codes must stay readable.
+    $exitMock = @'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CONFIG__')) | ConvertFrom-Json
+$watch = [Diagnostics.Stopwatch]::StartNew()
+while (-not [IO.File]::Exists($config.release) -and $watch.Elapsed.TotalSeconds -lt 15) { [Threading.Thread]::Sleep(10) }
+if (-not [IO.File]::Exists($config.release)) { exit 99 }
+exit $config.code
+'@
+    foreach ($expectedCode in @(0, 23)) {
+        $release = Join-Path $root ('release-exit-fixture-' + $expectedCode)
+        $config = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{ release = $release; code = $expectedCode } | ConvertTo-Json -Compress)))
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($exitMock.Replace('__CONFIG__', $config)))
+        $owner = [Diagnostics.Process]::new()
+        $owner.StartInfo = StartInfo $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded)
+        $attached = $null; $ownerStarted = $false
+        try {
+            if (-not $owner.Start()) { throw 'The attached-process fixture could not start.' }
+            $ownerStarted = $true
+            $attached = AttachProcess $owner.Id
+            $owner.Dispose()
+            [IO.File]::WriteAllText($release, 'exit now')
+            Check ($attached.WaitForExit(15000)) 'An attached process did not exit after release.'
+            $snapshot = ProcessSnapshot $attached
+            Check ($snapshot.hasExited -eq $true -and $null -eq $snapshot.error -and $null -ne $snapshot.exitCode -and $snapshot.exitCode -eq $expectedCode -and $snapshot.exitCodeHex -ceq ('0x' + $expectedCode.ToString('X8'))) 'The retained handle lost or changed the actual child exit code.'
+        } finally {
+            if ($null -ne $attached) {
+                if (-not $attached.HasExited) { $attached.Kill($true); $attached.WaitForExit() }
+                $attached.Dispose()
+            } elseif ($ownerStarted -and -not $owner.HasExited) { $owner.Kill($true); $owner.WaitForExit() }
+            $owner.Dispose()
+        }
+    }
 } finally {
     $env:SOURCE_READ_TOKEN = $savedToken
     $env:QT_PLUGIN_PATH = $savedQt
