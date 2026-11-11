@@ -16,14 +16,15 @@ if (-not $IsWindows -or $env:GITHUB_ACTIONS -cne 'true' -or -not $env:RUNNER_TEM
 
 function Ordinary([string]$Path, [bool]$Directory = $false) {
     $full = [IO.Path]::GetFullPath($Path)
-    $item = Get-Item -LiteralPath $full -Force
-    if ($item.PSIsContainer -ne $Directory) { throw 'Unexpected input file type.' }
+    $attributes = [IO.File]::GetAttributes($full)
+    if ((($attributes -band [IO.FileAttributes]::Directory) -ne 0) -ne $Directory) { throw 'Unexpected input file type.' }
     $node = $full
     while ($node) {
-        if ((Get-Item -LiteralPath $node -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Linked input paths are not supported.'
         }
         $node = Split-Path -Parent $node
+        if ($node) { $attributes = [IO.File]::GetAttributes($node) }
     }
     return $full
 }
