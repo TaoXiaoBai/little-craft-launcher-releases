@@ -41,6 +41,14 @@ def release_notes(repository, tag, hashes, changes=None):
         raise ValueError("Both runtime checksums are required")
     base = f"https://github.com/{repository}/releases/download/{tag}"
     legacy = tag in LEGACY_LINUX_TAGS
+    version, phase, sequence = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)-(pre|alpha|beta|rc)\.([0-9]+)", tag).groups()
+    version = tuple(int(part) for part in version.split("."))
+    # Historical pre.1–pre.8 notes retain their original configuration status.
+    configured_microsoft = version > (1, 0, 0) or (
+        version == (1, 0, 0) and (phase != "pre" or int(sequence) >= 9))
+    microsoft_guidance = (
+        "- Microsoft 登录已内置客户端配置，请使用拥有 Minecraft Java 版的账号测试；Mojang 服务准入及实际登录结果仍待确认。LittleSkin 已配置。"
+        if configured_microsoft else "- Microsoft 登录仍等待项目客户端配置及相关服务准入；LittleSkin 已配置。")
     default_intro = ("用于测试的预发布版本，欢迎反馈使用中遇到的问题。" if legacy else
                      "补齐 Linux x86_64 游戏启动、Java 管理和系统密钥环保存，Linux 下载改为 AppImage。")
     intro = (changes or default_intro).strip()
@@ -52,7 +60,7 @@ def release_notes(repository, tag, hashes, changes=None):
                  "- Windows 程序尚未签名。"] if legacy else
                 ["- Linux 可下载官方运行时 Java 8/17/21/25，也可选择本机 Java。",
                  "- Linux 在线凭据保存需要可用的系统密钥环（Secret Service）。密钥环不可用、无法解锁、取消或超时会提示失败，不回退明文。",
-                 "- Microsoft 登录仍等待项目客户端配置及相关服务准入；LittleSkin 已配置。",
+                 microsoft_guidance,
                  "- Windows 程序尚未签名。"])
     lines = [intro, "", "## 下载", "",
              "| 平台 | 下载 | 启动方式 |", "| --- | --- | --- |",
