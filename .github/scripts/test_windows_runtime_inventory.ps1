@@ -39,6 +39,21 @@ try {
         Put (Join-Path $runtime ('qml/QtQuick/' + $name)) ('public SDK ' + $name)
     }
     Put (Join-Path $runtime 'mclauncher-qt.exe') 'fixture runtime'
+    $ordinaryFile = Join-Path $runtime 'mclauncher-qt.exe'
+    Check ((Ordinary $ordinaryFile) -ceq [IO.Path]::GetFullPath($ordinaryFile)) 'An ordinary file was not accepted.'
+    Check ((Ordinary $runtime $true) -ceq [IO.Path]::GetFullPath($runtime)) 'An ordinary directory was not accepted.'
+    Reject { Ordinary '' } 'An empty path was accepted.'
+    Reject { Ordinary $runtime } 'A directory was accepted as a file.'
+    Reject { Ordinary $ordinaryFile $true } 'A file was accepted as a directory.'
+    Reject { Ordinary (Join-Path $runtime 'missing.dll') } 'A missing file was accepted.'
+    Reject { Ordinary (Join-Path $ordinaryFile 'child.dll') } 'A file was accepted as an ancestor directory.'
+    $linkedRoot = Join-Path $root 'linked-runtime'
+    $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+    $null = New-Item -ItemType $linkType -Path $linkedRoot -Target $runtime
+    try {
+        Reject { Ordinary $linkedRoot $true } 'A linked directory or Windows junction was accepted.'
+        Reject { Ordinary (Join-Path $linkedRoot 'mclauncher-qt.exe') } 'A linked ancestor or Windows junction was accepted.'
+    } finally { (Get-Item -LiteralPath $linkedRoot -Force).Delete() }
     AssertPublicQmlFiles $runtime $sdk
     Check $true 'All supported public QML file types should pass.'
 
