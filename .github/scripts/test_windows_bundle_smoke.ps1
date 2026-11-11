@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'smoke-windows-bundle.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'The independent Windows smoke script did not parse.' }
-$required = @('Ordinary', 'Digest', 'CanonicalPath', 'SamePath', 'AssertRuntime', 'StartInfo', 'InvokeCli')
+$required = @('Ordinary', 'Digest', 'CanonicalPath', 'SamePath', 'AssertRuntime', 'StartInfo', 'InvokeCli', 'InvokeConcurrentCli', 'ProcessSnapshot')
 $functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -cin $required }, $true))
 if ($functions.Count -ne $required.Count) { throw 'The independent smoke helpers are incomplete.' }
 foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
@@ -19,6 +19,13 @@ $null = [IO.Directory]::CreateDirectory($root)
 $savedToken = $env:SOURCE_READ_TOKEN
 $savedQt = $env:QT_PLUGIN_PATH
 try {
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $snapshot = ProcessSnapshot $self
+        Check ($snapshot.id -eq $PID -and $snapshot.hasExited -eq $false -and $null -eq $snapshot.exitCode -and $null -eq $snapshot.error) 'Live process diagnostics lost the PID or invented an exit code.'
+    } finally { $self.Dispose() }
+    $snapshot = ProcessSnapshot $null
+    Check ($null -eq $snapshot.id -and $null -eq $snapshot.hasExited -and $null -eq $snapshot.exitCode -and $null -eq $snapshot.error) 'Missing process diagnostics invented a started process.'
     Check (SamePath 'C:\用户 data\cache\mclauncher-qt.exe' '\\?\C:\用户 data\cache\mclauncher-qt.exe') 'Extended local module paths differ from ordinary local paths.'
     Reject { CanonicalPath '\\?\UNC\server\share\mclauncher-qt.exe' }
     Reject { CanonicalPath '\\.\C:\cache\mclauncher-qt.exe' }
@@ -88,6 +95,30 @@ $err.Flush()
     $json = (InvokeCli $pwsh @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $command) 'utf8-native-cli-fixture') | ConvertFrom-Json
     Check ($json.dataRoot -ceq 'D:/a/_temp/单文件 独立运行 smoke/独立 data with spaces' -and $json.status -ceq 'NATIVE_STATE_READ') 'Raw UTF-8 CLI JSON changed its Chinese data root.'
     Check ([IO.File]::ReadAllText((Join-Path $logs 'utf8-native-cli-fixture.stderr.log')) -ceq '中文错误诊断') 'Raw UTF-8 stderr diagnostics changed.'
+
+    # Each mock process waits for the other's marker before returning JSON.
+    # Waiting for the first before starting the second would fail this barrier.
+    $pairMock = @'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CONFIG__')) | ConvertFrom-Json
+[IO.File]::WriteAllText($config.marker, 'ready')
+$watch = [Diagnostics.Stopwatch]::StartNew()
+while (-not [IO.File]::Exists($config.peer) -and $watch.Elapsed.TotalSeconds -lt 15) { [Threading.Thread]::Sleep(10) }
+if (-not [IO.File]::Exists($config.peer)) { exit 9 }
+$json = @{dataRoot=$config.root; instances=@(); status='NATIVE_STATE_READ'} | ConvertTo-Json -Compress
+$out = [Console]::OpenStandardOutput()
+$bytes = [Text.Encoding]::UTF8.GetBytes($json)
+$out.Write($bytes, 0, $bytes.Length)
+$out.Flush()
+'@
+    $pair = @(for ($i = 0; $i -lt 2; ++$i) {
+        $data = [ordered]@{ root = (Join-Path $root ('并发 profile ' + $i)); marker = (Join-Path $root ('ready-' + $i)); peer = (Join-Path $root ('ready-' + (1 - $i))) }
+        $config = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($data | ConvertTo-Json -Compress)))
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($pairMock.Replace('__CONFIG__', $config)))
+        [pscustomobject]@{ Arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded); Root = $data.root; Label = ('concurrent-fixture-' + $i) }
+    })
+    $results = @(InvokeConcurrentCli $pwsh $pair)
+    Check ($results.Count -eq 2 -and $results[0].dataRoot -ceq $pair[0].Root -and $results[1].dataRoot -ceq $pair[1].Root) 'Concurrent UTF-8 readers did not retain independent profiles.'
+    Check ([IO.File]::Exists((Join-Path $root 'ready-0')) -and [IO.File]::Exists((Join-Path $root 'ready-1'))) 'Both processes did not cross the concurrent-start barrier.'
 } finally {
     $env:SOURCE_READ_TOKEN = $savedToken
     $env:QT_PLUGIN_PATH = $savedQt
