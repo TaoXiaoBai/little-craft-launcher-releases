@@ -25,7 +25,7 @@ Windows 10/11 x64 · Linux x86_64 · 十二套主题 + 一套测试主题 · Qt 
 
 ## 试用预发布版本
 
-1. **下载并校验。** 从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载，阅读发行说明并核对 SHA-256。当前 Windows ZIP 需完整解压后运行 `mclauncher-qt.exe`，请保留相邻的 DLL 与运行库目录。
+1. **下载并校验。** 从 [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) 下载，阅读发行说明并核对 SHA-256。从 pre.10 起，Windows ZIP 只含一个自带运行依赖的 `mclauncher-qt.exe`，解压后直接运行；更早的 Windows 包仍需完整解压。[Windows 分发说明](docs/WINDOWS_DISTRIBUTION.md)
 2. **添加账号，选择 Java。** 可用的账号类型取决于地区，见下文[账号与数据](#账号与数据)。
 3. **创建或导入实例。** 选择游戏版本和加载器，等游戏文件准备好后从首页启动。更换版本或整合包前，请先备份存档。
 
