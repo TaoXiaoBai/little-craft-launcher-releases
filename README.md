@@ -25,7 +25,7 @@ Windows 10/11 x64 · Linux x86_64 · Twelve themes + one experimental theme · Q
 
 ## Try the prerelease
 
-1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. Extract the current Windows ZIP in full and run `mclauncher-qt.exe`; keep its DLLs and runtime folders together.
+1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. From pre.10, the Windows ZIP contains one `mclauncher-qt.exe` with its runtime embedded; extract it and run it. Earlier Windows packages need to be extracted in full. [Windows packaging (简体中文)](docs/WINDOWS_DISTRIBUTION.md)
 2. **Add an account and choose Java.** Which account types you can use depends on your region; see [Accounts and data](#accounts-and-data).
 3. **Create or import an instance.** Pick a game version and loader, wait for the game files, then launch from Home. Back up your worlds before changing versions or modpacks.
 
