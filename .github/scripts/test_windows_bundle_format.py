@@ -36,6 +36,11 @@ OPTIONAL_OFFSET = PE_OFFSET + 24
 SECTION_OFFSET = OPTIONAL_OFFSET + 0xF0
 RESOURCE_RAW = 0x400
 RESOURCE_RVA = 0x2000
+SAFE_MANIFEST = b'''<?xml version="1.0" encoding="UTF-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+<trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>
+<requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+</requestedPrivileges></security></trustInfo></assembly>'''
 
 
 def align(value, unit):
@@ -106,10 +111,52 @@ def _resource_bytes(resources, languages):
     return bytes(output)
 
 
+def _resource_bytes_with_manifests(resources, languages, manifests):
+    """Independent PE resource writer for typed manifest fixtures.
+
+    Keep the old RCDATA-only layout byte-for-byte for existing hostile-offset
+    tests; this builder is used only by the new privilege-policy scenarios.
+    """
+    data = bytearray()
+    leaves = []
+
+    def directory(entries):
+        start = len(data)
+        data.extend(b"\0" * (16 + len(entries) * 8))
+        struct.pack_into("<IIHHHH", data, start, 0, 0, 0, 0, 0, len(entries))
+        for index, (number, value) in enumerate(entries):
+            if isinstance(value, list):
+                target = 0x80000000 | directory(value)
+            else:
+                target = len(data)
+                data.extend(b"\0" * 16)
+                leaves.append((target, value))
+            struct.pack_into("<II", data, start + 16 + index * 8, number, target)
+        return start
+
+    types = []
+    items = list(resources.items()) if isinstance(resources, dict) else list(resources)
+    if items:
+        types.append((10, [(number, [(language, value) for language in languages])
+                           for number, value in items]))
+    grouped = {}
+    for number, language, value in manifests:
+        grouped.setdefault(number, []).append((language, value))
+    types.append((24, list(grouped.items())))
+    directory(types)
+    for record, value in leaves:
+        data.extend(b"\0" * (align(len(data), 8) - len(data)))
+        start = len(data)
+        data.extend(value)
+        struct.pack_into("<IIII", data, record, RESOURCE_RVA + start, len(value), 0, 0)
+    return bytes(data)
+
+
 def build_pe(resources=None, imports=("KERNEL32.dll",), *, machine=0x8664,
-             subsystem=2, languages=(0,)):
+             subsystem=2, languages=(0,), manifests=()):
     """A valid PE32+ GUI with executable entrypoint and actual import descriptors."""
-    resource = _resource_bytes(resources or {}, languages)
+    resource = (_resource_bytes_with_manifests(resources or {}, languages, manifests)
+                if manifests else _resource_bytes(resources or {}, languages))
     resource_size = align(max(1, len(resource)), 0x200)
     import_rva = align(RESOURCE_RVA + max(1, len(resource)), 0x1000)
     import_raw = RESOURCE_RAW + resource_size
@@ -258,6 +305,97 @@ def patch_zip_field(payload, local_offset, central_offset, value):
     struct.pack_into("<H", output, local + local_offset, value)
     struct.pack_into("<H", output, central + central_offset, value)
     return bytes(output)
+
+
+class WindowsPrivilegeManifestTests(unittest.TestCase):
+    tag = "v1.0.0-pre.11"
+
+    def payload(self, manifests=((1, 0, SAFE_MANIFEST),), *, tag=None):
+        return build_runtime_payload(tag or self.tag, {
+            ENTRYPOINT: build_pe(subsystem=3, manifests=manifests)})
+
+    def bundle(self, manifests=((1, 0, SAFE_MANIFEST),), *, payload=None):
+        return build_bundle(self.payload() if payload is None else payload,
+                            self.tag, manifests=manifests)
+
+    def test_policy_freezes_existing_previews_and_requires_future_versions(self):
+        for tag in ("v0.9.9-pre.99", "v1.0.0-pre.1", "v1.0.0-pre.9", "v1.0.0-pre.10"):
+            with self.subTest(tag=tag):
+                self.assertFalse(BUNDLE.explicit_privileges_required(tag))
+        for tag in (self.tag, "v1.0.0-pre.100", "v1.0.0-rc.1", "v1.0.0", "v1.0.1-pre.1"):
+            with self.subTest(tag=tag):
+                self.assertTrue(BUNDLE.explicit_privileges_required(tag))
+
+    def test_future_bundle_requires_valid_manifests_on_both_executables(self):
+        payload = self.payload()
+        index = BUNDLE.create_index(payload, self.tag)
+        self.assertEqual(BUNDLE.parse_index(index, self.tag)["tag"], self.tag)
+        self.assertEqual(BUNDLE.inspect_bundle(self.bundle(payload=payload), self.tag)["tag"], self.tag)
+        # Legacy/pre.10 fixture deliberately contains no application manifests.
+        self.assertEqual(BUNDLE.inspect_bundle(build_bundle(), TAG)["tag"], TAG)
+
+    def test_future_inner_and_outer_missing_manifests_are_rejected(self):
+        with self.assertRaisesRegex(BUNDLE.BundleError, "manifest"):
+            BUNDLE.create_index(self.payload(manifests=()), self.tag)
+        with self.assertRaisesRegex(BUNDLE.BundleError, "manifest"):
+            BUNDLE.inspect_bundle(self.bundle(manifests=()), self.tag)
+
+    def test_privilege_or_uiaccess_escalation_is_rejected_in_either_executable(self):
+        invalid = (
+            SAFE_MANIFEST.replace(b'asInvoker', b'requireAdministrator'),
+            SAFE_MANIFEST.replace(b'asInvoker', b'highestAvailable'),
+            SAFE_MANIFEST.replace(b'uiAccess="false"', b'uiAccess="true"'),
+            SAFE_MANIFEST.replace(b' uiAccess="false"', b''),
+        )
+        for xml in invalid:
+            with self.subTest(xml=xml):
+                manifests = ((1, 0, xml),)
+                with self.assertRaises(BUNDLE.BundleError):
+                    BUNDLE.create_index(self.payload(manifests), self.tag)
+                with self.assertRaises(BUNDLE.BundleError):
+                    BUNDLE.inspect_bundle(self.bundle(manifests), self.tag)
+
+    def test_duplicate_manifest_languages_ids_and_execution_levels_are_rejected(self):
+        level = b'<requestedExecutionLevel level="asInvoker" uiAccess="false"/>'
+        duplicate = SAFE_MANIFEST.replace(level, level + level)
+        cases = (
+            ((1, 0, SAFE_MANIFEST), (1, 1033, SAFE_MANIFEST)),
+            ((1, 0, SAFE_MANIFEST), (2, 0, SAFE_MANIFEST)),
+            ((2, 0, SAFE_MANIFEST),),
+            ((1, 0, duplicate),),
+        )
+        for manifests in cases:
+            with self.subTest(manifests=manifests):
+                with self.assertRaises(BUNDLE.BundleError):
+                    BUNDLE.create_index(self.payload(manifests), self.tag)
+                with self.assertRaises(BUNDLE.BundleError):
+                    BUNDLE.inspect_bundle(self.bundle(manifests), self.tag)
+
+    def test_malformed_wrong_namespace_and_entity_manifests_are_rejected(self):
+        entity = SAFE_MANIFEST.replace(b'<assembly',
+            b'<!DOCTYPE assembly [<!ENTITY privilege "asInvoker">]><assembly', 1).replace(
+            b'level="asInvoker"', b'level="&privilege;"')
+        cases = (
+            b'not xml',
+            b'<assembly>',
+            SAFE_MANIFEST.replace(b' manifestVersion="1.0"', b''),
+            SAFE_MANIFEST.replace(b'urn:schemas-microsoft-com:asm.v3', b'urn:wrong'),
+            SAFE_MANIFEST.replace(b'urn:schemas-microsoft-com:asm.v1', b'urn:wrong'),
+            SAFE_MANIFEST.replace(b'</assembly>', b'<trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"/></assembly>'),
+            entity,
+            entity.decode().replace('encoding="UTF-8"', 'encoding="UTF-16"').encode("utf-16"),
+            b' ' * (BUNDLE.MAX_MANIFEST + 1),
+        )
+        for xml in cases:
+            with self.subTest(xml=xml[:80]):
+                with self.assertRaises(BUNDLE.BundleError):
+                    BUNDLE.inspect_bundle(self.bundle(((1, 0, xml),)), self.tag)
+
+    def test_utf16_and_non_neutral_manifest_language_are_read_correctly(self):
+        text = SAFE_MANIFEST.decode().replace('encoding="UTF-8"', 'encoding="UTF-16"')
+        manifests = ((1, 1033, text.encode("utf-16")),)
+        self.assertEqual(BUNDLE.inspect_bundle(self.bundle(manifests,
+            payload=self.payload(manifests)), self.tag)["tag"], self.tag)
 
 
 class WindowsBundleFormatTests(unittest.TestCase):

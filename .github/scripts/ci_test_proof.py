@@ -24,6 +24,12 @@ import xml.etree.ElementTree as ET
 
 UI = frozenset(('native_ui', 'local_ui', 'populated_ui', 'external_auth_ui', 'winmd_ui',
                 'mod_favorites_ui', 'ui_regression', 'crash_notification_ui', 'theme_controls'))
+BACKEND = frozenset('''auth_build_config launch_assessment launch_tuning task_model
+public_error operation_runner cli_options host_services launcher_bridge project_logo
+version_resolver archive network java managed_runtime state_store legacy_import auth
+region_policy content content_transport mod_favorites content_controller pack_service
+game_service authlib_injector forge_installer loader_catalog instance_service world
+world_service library_controller diagnostics crash_analyzer'''.split())
 PLATFORMS = {
     'windows-x64': (43, 'windows', 'Test windows-x64 companion UI'),
     'linux-x86_64': (44, 'linux', 'Test linux-x86_64 companion UI'),
@@ -150,12 +156,33 @@ def ids(names):
 
 
 def partition(plan, discovered):
-    require(set(plan) == {'schemaVersion', 'primaryUi', 'companionUi'} and type(plan['schemaVersion']) is int and plan['schemaVersion'] == 1,
-            'INVALID_PARTITION_PLAN')
+    version = validate_plan(plan)
     first, second = group_names(plan['primaryUi']), group_names(plan['companionUi'])
     require(first and second and not first & second and first | second == UI and UI <= discovered,
             'INCOMPLETE_UI_PARTITION')
+    if version == 2:
+        require(discovered in (inventory('windows-x64'), inventory('linux-x86_64')),
+                'INCOMPLETE_REGISTRATION')
     return {'primary': (discovered - UI) | first, 'companion': second}
+
+
+def validate_plan(plan):
+    require(isinstance(plan, dict) and type(plan.get('schemaVersion')) is int and
+            plan['schemaVersion'] in (1, 2), 'INVALID_PARTITION_PLAN')
+    version = plan['schemaVersion']
+    keys = {'schemaVersion', 'primaryUi', 'companionUi'}
+    if version == 2:
+        keys.add('extraBackendGroups')
+    require(set(plan) == keys and (version == 1 or plan['extraBackendGroups'] == ['telemetry']),
+            'INVALID_PARTITION_PLAN')
+    first, second = group_names(plan['primaryUi']), group_names(plan['companionUi'])
+    require(first and second and not first & second and first | second == UI and
+            (version == 1 or (len(first) == 4 and len(second) == 5)), 'INCOMPLETE_UI_PARTITION')
+    return version
+
+
+def inventory(platform):
+    return UI | BACKEND | {'telemetry'} | ({'linux_auth_vault'} if platform == 'linux-x86_64' else set())
 
 
 def validate_junit(path, selected):
@@ -246,7 +273,7 @@ def source_identity(source):
     return commit, tree, digest(records)
 
 
-def build_identity(source, build, sdk, cache, registration):
+def build_identity(source, build, sdk, cache, registration, plan_schema=1):
     normalize = normalizer(source, build, sdk)
     require(Path(cache.get('CMAKE_PREFIX_PATH', '')).resolve() == Path(sdk).resolve(), 'SDK_PREFIX_MISMATCH')
     expected = {'CMAKE_BUILD_TYPE': 'Release', 'BUILD_TESTING': 'ON', 'MCL_STATIC_RELEASE': 'OFF', 'MCL_CORE_ONLY': 'OFF'}
@@ -273,7 +300,14 @@ def build_identity(source, build, sdk, cache, registration):
     registered = [{'name': item['name'], 'command': item['command'],
                    'properties': [p for p in item.get('properties', []) if p.get('name') != 'COST']}
                   for item in sorted(registration['tests'], key=lambda item: item['name'])]
-    return sdk_hash, digest(tools), digest(normalize(flags)), digest(normalize(registered))
+    config = normalize(flags)
+    if plan_schema == 2:
+        # The cache can leave the build label empty while CMake resolves a Git
+        # tag/SHA. Bind the effective compiled endpoint and label as well.
+        header = Path(build) / 'generated/telemetry_build_config.h'
+        require(header.is_file(), 'TELEMETRY_CONFIGURATION_MISSING')
+        config = {'cache': config, 'generatedHeaders': {'generated/telemetry_build_config.h': file_hash(header)}}
+    return sdk_hash, digest(tools), digest(config), digest(normalize(registered))
 
 
 def validate_driver(driver, source, build, commit, tree, platform, shard, full, selected, registration, run_id, attempt):
@@ -355,6 +389,7 @@ def create_proof(args, environment=os.environ):
     source, build, sdk = map(lambda value: Path(value).absolute(), (args.source_root, args.build_dir, args.sdk_root))
     commit, tree, source_sha = source_identity(source)
     plan = read_json(source / 'qt-native/tests/ci/ui-shard-plan.json')
+    plan_schema = validate_plan(plan)
     cache = cache_values(build / 'CMakeCache.txt')
     ctest = cache.get('CMAKE_CTEST_COMMAND')
     if not ctest:
@@ -363,15 +398,16 @@ def create_proof(args, environment=os.environ):
     require(registration.get('kind') == 'ctestInfo' and registration.get('version', {}).get('major') == 1,
             'INVALID_CTEST_REGISTRATION')
     full = group_names([item['name'] for item in registration.get('tests', [])])
-    require(len(full) == PLATFORMS[args.platform][0], 'INCOMPLETE_REGISTRATION')
+    require(len(full) == PLATFORMS[args.platform][0] + (plan_schema == 2) and
+            (plan_schema == 1 or full == inventory(args.platform)), 'INCOMPLETE_REGISTRATION')
     parts = partition(plan, full)
     selected = parts[args.shard]
     driver = read_json(args.driver_result, 32 * 1024 * 1024)
     validate_driver(driver, source, build, commit, tree, args.platform, args.shard, full, selected, registration, run_id, attempt)
     validate_junit(args.junit, selected)
-    sdk_sha, compiler_sha, config_sha, registration_sha = build_identity(source, build, sdk, cache, registration)
+    sdk_sha, compiler_sha, config_sha, registration_sha = build_identity(source, build, sdk, cache, registration, plan_schema)
     require(source_identity(source) == (commit, tree, source_sha), 'SOURCE_CHANGED_DURING_PROOF')
-    proof = dict(schemaVersion=1, kind='LCL_CTEST_SHARD_PROOF', repositorySha256=digest(repo.lower()),
+    proof = dict(schemaVersion=plan_schema, kind='LCL_CTEST_SHARD_PROOF', repositorySha256=digest(repo.lower()),
         workflowCommit=workflow_sha, runId=run_id, runAttempt=attempt, platform=args.platform, shard=args.shard,
         sourceCommit=commit, sourceTree=tree, sourceInputsSha256=source_sha, planSha256=digest(plan),
         registrationSha256=registration_sha, sdkSha256=sdk_sha, compilerSha256=compiler_sha, configSha256=config_sha,
@@ -384,7 +420,7 @@ def create_proof(args, environment=os.environ):
 
 def validate_proof(proof):
     require(isinstance(proof, dict) and set(proof) == PROOF_KEYS, 'INVALID_PROOF_SCHEMA')
-    require(type(proof['schemaVersion']) is int and proof['schemaVersion'] == 1 and proof['kind'] == 'LCL_CTEST_SHARD_PROOF'
+    require(type(proof['schemaVersion']) is int and proof['schemaVersion'] in (1, 2) and proof['kind'] == 'LCL_CTEST_SHARD_PROOF'
             and proof['platform'] in PLATFORMS and proof['shard'] in ('primary', 'companion')
             and proof['fullSuite'] is False and type(proof['failed']) is int and proof['failed'] == 0
             and type(proof['skipped']) is int and proof['skipped'] == 0, 'PROOF_NOT_ALL_PASS')
@@ -398,8 +434,12 @@ def validate_proof(proof):
         require(isinstance(values, list) and all(hex_value(value, 64) for value in values)
                 and values == sorted(set(values)), 'INVALID_PROOF_GROUP_SET')
     full, first, second = map(lambda key: set(proof[key]), ('fullGroupIds', 'primaryGroupIds', 'companionGroupIds'))
-    require(len(full) == PLATFORMS[proof['platform']][0] and set(ids(UI)) <= full and first and second
+    version = proof['schemaVersion']
+    require(len(full) == PLATFORMS[proof['platform']][0] + (version == 2) and set(ids(UI)) <= full and first and second
             and second < set(ids(UI)) and not first & second and first | second == full, 'INVALID_PROOF_PARTITION')
+    if version == 2:
+        require(full == set(ids(inventory(proof['platform']))) and set(ids({'telemetry'})) <= first and
+                len(first & set(ids(UI))) == 4 and len(second) == 5, 'INVALID_PROOF_PARTITION')
     expected = first if proof['shard'] == 'primary' else second
     require(set(proof['selectedPassedGroupIds']) == expected and type(proof['fullGroupCount']) is int
             and type(proof['selectedGroupCount']) is int and proof['fullGroupCount'] == len(full)
@@ -459,10 +499,11 @@ def combine(local, companion, repo, sha, run_id, attempt):
     require(local['shard'] == 'primary' and companion['shard'] == 'companion', 'SHARD_ROLE_MISMATCH')
     require(local['repositorySha256'] == digest(repo.lower()) and local['workflowCommit'] == sha
             and local['runId'] == run_id and local['runAttempt'] == attempt, 'LOCAL_PROOF_NOT_CURRENT')
-    require(all(local[key] == companion[key] for key in IDENTITY_KEYS), 'SHARD_IDENTITY_MISMATCH')
+    require(local['schemaVersion'] == companion['schemaVersion'] and
+            all(local[key] == companion[key] for key in IDENTITY_KEYS), 'SHARD_IDENTITY_MISMATCH')
     first, second, full = map(set, (local['selectedPassedGroupIds'], companion['selectedPassedGroupIds'], local['fullGroupIds']))
     require(not first & second and first | second == full, 'COMBINED_COVERAGE_MISMATCH')
-    return {**{key: local[key] for key in IDENTITY_KEYS}, 'schemaVersion': 1,
+    return {**{key: local[key] for key in IDENTITY_KEYS}, 'schemaVersion': local['schemaVersion'],
             'kind': 'LCL_CTEST_PLATFORM_PROOF', 'status': 'PASS_COMBINED_CURRENT_CTEST', 'fullSuite': True,
             'passedGroupCount': len(full), 'primaryProofSha256': digest(local), 'companionProofSha256': digest(companion)}
 
@@ -521,6 +562,8 @@ def main(argv=None):
     global PRIVATE_LOG
     parser = argparse.ArgumentParser(description='Create and combine current-attempt CTest shard proofs')
     subparsers = parser.add_subparsers(dest='operation', required=True)
+    plan = subparsers.add_parser('validate-plan')
+    plan.add_argument('--plan', type=Path, required=True)
     create = subparsers.add_parser('create')
     for name in ('source-root', 'build-dir', 'sdk-root', 'driver-result', 'junit', 'output'):
         create.add_argument('--' + name, type=Path, required=True)
@@ -534,10 +577,18 @@ def main(argv=None):
     for command in (create, verify):
         command.add_argument('--private-log', type=Path)
     args = parser.parse_args(argv)
-    PRIVATE_LOG = args.private_log
+    PRIVATE_LOG = getattr(args, 'private_log', None)
     if PRIVATE_LOG is None and os.environ.get('RUNNER_TEMP'):
         PRIVATE_LOG = Path(os.environ['RUNNER_TEMP']) / 'private-build-logs/ci-test-proof-private.log'
     try:
+        if args.operation == 'validate-plan':
+            plan = read_json(args.plan)
+            validate_plan(plan)
+            # Both historical workflow preflights required this 4/5 layout.
+            require(len(plan['primaryUi']) == 4 and len(plan['companionUi']) == 5,
+                    'INCOMPLETE_UI_PARTITION')
+            print('CI_TEST_SHARD_PLAN_VALID')
+            return 0
         proof = create_proof(args) if args.operation == 'create' else verify_proof(args)
         write_json(args.output, proof)
     except ProofError as failure:

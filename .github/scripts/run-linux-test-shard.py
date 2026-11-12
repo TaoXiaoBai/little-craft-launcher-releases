@@ -28,6 +28,7 @@ game_service authlib_injector forge_installer loader_catalog instance_service wo
 world_service library_controller diagnostics crash_analyzer linux_auth_vault'''.split())
 EXPECTED_GROUPS = UI_GROUPS | BACKEND_GROUPS
 TIMEOUTS = {name: 180 for name in BACKEND_GROUPS}
+TIMEOUTS['telemetry'] = 180
 TIMEOUTS.update(auth_build_config=60, linux_auth_vault=120, native_ui=420, local_ui=480,
                 populated_ui=120, external_auth_ui=120, winmd_ui=180, mod_favorites_ui=180,
                 ui_regression=900, crash_notification_ui=180, theme_controls=120)
@@ -100,12 +101,13 @@ def read_json_unique(path: Path) -> object:
     return json.loads(path.read_text(encoding='utf-8-sig'), object_pairs_hook=unique)
 
 
-def select_groups(plan: object, names: list[str], shard: str) -> list[str]:
-    if shard not in SHARDS or len(names) != len(set(names)) or set(names) != EXPECTED_GROUPS:
-        raise ShardError('INCOMPLETE_CTEST_INVENTORY')
-    if not isinstance(plan, dict) or set(plan) != {'schemaVersion', 'primaryUi', 'companionUi'}:
+def extra_backend_groups(plan: object) -> frozenset[str]:
+    if not isinstance(plan, dict) or type(plan.get('schemaVersion')) is not int or plan['schemaVersion'] not in (1, 2):
         raise ShardError('INVALID_SHARD_PLAN')
-    if type(plan['schemaVersion']) is not int or plan['schemaVersion'] != 1:
+    keys = {'schemaVersion', 'primaryUi', 'companionUi'}
+    if plan['schemaVersion'] == 2:
+        keys.add('extraBackendGroups')
+    if set(plan) != keys or (plan['schemaVersion'] == 2 and plan['extraBackendGroups'] != ['telemetry']):
         raise ShardError('INVALID_SHARD_PLAN')
     lists = [plan['primaryUi'], plan['companionUi']]
     if any(not isinstance(items, list) or any(not isinstance(x, str) or not NAME.fullmatch(x)
@@ -115,7 +117,14 @@ def select_groups(plan: object, names: list[str], shard: str) -> list[str]:
     if (len(primary) != 4 or len(companion) != 5 or len(set(primary + companion)) != 9
             or set(primary + companion) != UI_GROUPS):
         raise ShardError('INVALID_SHARD_PLAN')
-    selected = set(primary) | BACKEND_GROUPS if shard == 'primary' else set(companion)
+    return frozenset({'telemetry'}) if plan['schemaVersion'] == 2 else frozenset()
+
+
+def select_groups(plan: object, names: list[str], shard: str) -> list[str]:
+    extra = extra_backend_groups(plan)
+    if shard not in SHARDS or len(names) != len(set(names)) or set(names) != EXPECTED_GROUPS | extra:
+        raise ShardError('INCOMPLETE_CTEST_INVENTORY')
+    selected = set(plan['primaryUi']) | BACKEND_GROUPS | extra if shard == 'primary' else set(plan['companionUi'])
     return sorted(selected)
 
 
@@ -160,11 +169,12 @@ def properties(test: dict) -> dict:
     return result
 
 
-def collect_identities(registration: object, source: Path, build: Path, cache: dict) -> list[dict]:
+def collect_identities(registration: object, source: Path, build: Path, cache: dict, plan=None) -> list[dict]:
     if not isinstance(registration, dict) or not isinstance(registration.get('tests'), list):
         raise ShardError('INVALID_CTEST_REGISTRATION')
     tests = registration['tests']
-    if len(tests) != 44 or {t.get('name') for t in tests} != EXPECTED_GROUPS:
+    expected = EXPECTED_GROUPS | (extra_backend_groups(plan) if plan is not None else frozenset())
+    if len(tests) != len(expected) or {t.get('name') for t in tests} != expected:
         raise ShardError('INCOMPLETE_CTEST_INVENTORY')
     result = []
     for test in tests:
@@ -353,15 +363,16 @@ def execute(args: argparse.Namespace) -> int:
         state.update(sourceCommit=initial['commit'], sourceTree=initial['tree'], sourceSnapshotSha256=digest(initial))
         cache = read_cache(build)
         check_configuration(cache, source, build)
+        plan = read_json_unique(source/'qt-native/tests/ci/ui-shard-plan.json')
+        state['expectedTestGroups'] = sorted(EXPECTED_GROUPS | extra_backend_groups(plan))
         ctest = resolve_ctest(args.ctest, cache)
         state['ctestTool'] = file_identity(Path(ctest), system_tool=True)
         if (build/'Testing/Temporary/LastTest.log').exists():
             raise ShardError('PREVIOUS_TEST_RESULTS_PRESENT')
         registration = discover(ctest, build, env)
-        before = collect_identities(registration, source, build, cache)
+        before = collect_identities(registration, source, build, cache, plan)
         json_write_fresh(registration_path, registration)
         state.update(tests=before, registrationSha256=digest(registration))
-        plan = read_json_unique(source/'qt-native/tests/ci/ui-shard-plan.json')
         selected = select_groups(plan, [t['name'] for t in before], args.shard)
         state['selectedTestGroups'] = selected
         initialize_caches(build)
@@ -389,7 +400,7 @@ def execute(args: argparse.Namespace) -> int:
             try:
                 after_registration = discover(ctest, build, env)
                 state['testInputsStable'] = (after_registration == registration
-                    and collect_identities(after_registration, source, build, cache) == before
+                    and collect_identities(after_registration, source, build, cache, plan) == before
                     and file_identity(Path(ctest), system_tool=True) == state['ctestTool'])
                 if not state['testInputsStable']:
                     raise ShardError('TEST_INPUT_CHANGED')
