@@ -23,12 +23,17 @@ PLAN = {'schemaVersion': 1,
         'companionUi': ['local_ui', 'native_ui', 'mod_favorites_ui', 'crash_notification_ui', 'external_auth_ui']}
 
 
-def proof_pair(platform='windows-x64'):
+PLAN_V2 = {**PLAN, 'schemaVersion': 2, 'extraBackendGroups': ['telemetry']}
+
+
+def proof_pair(platform='windows-x64', schema=1):
     full = set(P.UI) | {'backend_' + str(i) for i in range(34)}
     if platform == 'linux-x86_64':
         full.add('linux_auth_vault')
-    parts = P.partition(PLAN, full)
-    common = dict(schemaVersion=1, kind='LCL_CTEST_SHARD_PROOF', repositorySha256=P.digest('fixture/builder'),
+    if schema == 2:
+        full = P.inventory(platform)
+    parts = P.partition(PLAN if schema == 1 else PLAN_V2, full)
+    common = dict(schemaVersion=schema, kind='LCL_CTEST_SHARD_PROOF', repositorySha256=P.digest('fixture/builder'),
         workflowCommit=ENV['GITHUB_SHA'], runId=99, runAttempt=1, platform=platform,
         sourceCommit='1' * 40, sourceTree='2' * 40, fullGroupIds=P.ids(full),
         primaryGroupIds=P.ids(parts['primary']), companionGroupIds=P.ids(parts['companion']),
@@ -124,6 +129,60 @@ class ProofValidation(unittest.TestCase):
         self.local, self.companion = proof_pair('linux-x86_64')
         self.path.write_bytes(P.canonical(self.local)); self.gh = FakeGitHub(self.companion)
         self.assertEqual(self.verify()['passedGroupCount'], 44)
+
+    def test_schema2_combination_requires_all_original_groups_and_primary_telemetry(self):
+        for platform, count in (('windows-x64', 44), ('linux-x86_64', 45)):
+            first, second = proof_pair(platform, 2)
+            result = P.combine(first, second, ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
+            self.assertEqual((result['schemaVersion'], result['passedGroupCount']), (2, count))
+            self.assertIn(P.ids({'telemetry'})[0], first['primaryGroupIds'])
+            malformed = copy.deepcopy(second)
+            old = P.ids({'auth'})[0]; new = P.ids({'surprise'})[0]
+            for key in ('fullGroupIds', 'primaryGroupIds'):
+                malformed[key] = sorted((set(malformed[key]) - {old}) | {new})
+            with self.assertRaises(P.ProofError):
+                P.validate_proof(malformed)
+            malformed = copy.deepcopy(second)
+            telemetry = P.ids({'telemetry'})[0]
+            ui = malformed['companionGroupIds'][0]
+            malformed['primaryGroupIds'] = sorted((set(malformed['primaryGroupIds']) - {telemetry}) | {ui})
+            malformed['companionGroupIds'] = sorted((set(malformed['companionGroupIds']) - {ui}) | {telemetry})
+            malformed['selectedPassedGroupIds'] = malformed['companionGroupIds']
+            with self.assertRaises(P.ProofError):
+                P.validate_proof(malformed)
+
+    def test_plan_versions_reject_unreviewed_extensions_and_preserve_nine_ui_groups(self):
+        self.assertEqual(P.validate_plan(PLAN), 1)
+        self.assertEqual(P.validate_plan(PLAN_V2), 2)
+        variants = [dict(PLAN_V2, extraBackendGroups=value) for value in
+                    ([], ['auth'], ['telemetry', 'auth'], ['telemetry', 'telemetry'], 'telemetry', [True])]
+        variants += [dict(PLAN, extraBackendGroups=['telemetry']), dict(PLAN, schemaVersion=2),
+                     dict(PLAN_V2, unexpected=True), dict(PLAN_V2, schemaVersion=True),
+                     dict(PLAN_V2, primaryUi=PLAN['primaryUi'][:-1])]
+        for value in variants:
+            with self.subTest(value=value), self.assertRaises(P.ProofError):
+                P.validate_plan(value)
+
+    def test_schema2_partition_rejects_missing_telemetry_or_replaced_backend(self):
+        full = P.inventory('windows-x64')
+        for names in (full - {'telemetry'}, (full - {'auth'}) | {'surprise'}, full | {'surprise'}):
+            with self.subTest(names=names), self.assertRaises(P.ProofError):
+                P.partition(PLAN_V2, names)
+
+    def test_read_only_preflight_accepts_both_plans_and_rejects_invalid_extensions(self):
+        path = self.root / 'plan.json'
+        invalid_layout = dict(PLAN, primaryUi=PLAN['primaryUi'][:-1],
+                              companionUi=PLAN['companionUi'] + PLAN['primaryUi'][-1:])
+        for plan, expected in ((PLAN, 0), (PLAN_V2, 0), (invalid_layout, 1),
+                               (dict(PLAN_V2, extraBackendGroups=['telemetry', 'auth']), 1)):
+            path.write_bytes(P.canonical(plan))
+            before = path.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(P.main(['validate-plan', '--plan', str(path)]), expected)
+            self.assertEqual(path.read_bytes(), before)
+        path.write_text('{"schemaVersion":2,"schemaVersion":2}')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(P.main(['validate-plan', '--plan', str(path)]), 1)
 
     def test_every_identity_mismatch_is_rejected(self):
         for key in P.IDENTITY_KEYS:
@@ -229,6 +288,8 @@ class ProofValidation(unittest.TestCase):
 
 
 class CreateProof(unittest.TestCase):
+    schema_version = 1
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.root = Path(self.temporary.name)
         self.source = self.root / 'source'; self.native = self.source / 'qt-native'
@@ -237,7 +298,12 @@ class CreateProof(unittest.TestCase):
         self.platform = 'windows-x64' if os.name == 'nt' else 'linux-x86_64'
         self.put(self.native / 'CMakeLists.txt', 'fixture project')
         self.put(self.native / 'tests/cmake/auth_build_config_tests.cmake', 'fixture script')
-        self.put(self.native / 'tests/ci/ui-shard-plan.json', json.dumps(PLAN))
+        self.plan = copy.deepcopy(PLAN if self.schema_version == 1 else PLAN_V2)
+        self.put(self.native / 'tests/ci/ui-shard-plan.json', json.dumps(self.plan))
+        if self.schema_version == 2:
+            self.put(self.build / 'generated/telemetry_build_config.h',
+                     '#define MCL_TELEMETRY_ENDPOINT "https://telemetry.example.invalid/events"\n'
+                     '#define MCL_TELEMETRY_BUILD_LABEL "fixture-effective-sha"\n')
         for arguments in (['init', '-q'], ['config', 'user.email', 'fixture@example.invalid'],
                           ['config', 'user.name', 'Fixture'], ['add', '.'], ['commit', '-qm', 'fixture']):
             subprocess.run(['git', '-C', str(self.source), *arguments], check=True, capture_output=True)
@@ -260,6 +326,8 @@ class CreateProof(unittest.TestCase):
         for name in sdk_paths: self.put(self.sdk / name, 'fixed sdk ' + name)
         self.full = set(P.UI) | {'auth_build_config'} | {'backend_' + str(i) for i in range(33)}
         if self.platform == 'linux-x86_64': self.full.add('linux_auth_vault')
+        if self.schema_version == 2:
+            self.full = P.inventory(self.platform)
         self.registration = {'kind': 'ctestInfo', 'version': {'major': 1, 'minor': 0}, 'tests': []}
         self.records = []
         for name in sorted(self.full):
@@ -290,7 +358,7 @@ class CreateProof(unittest.TestCase):
         return self.original_command(arguments, **kwargs)
 
     def select(self, role):
-        self.args.shard = role; selected = P.partition(PLAN, self.full)[role]
+        self.args.shard = role; selected = P.partition(self.plan, self.full)[role]
         self.driver = dict(schemaVersion=2 if self.platform == 'windows-x64' else 1,
             platform=self.platform, status='PASS_PARTIAL_CURRENT_CTEST', fullSuite=False, testShard=role,
             previousResultsReused=False, runId=99, runAttempt=1, sourceCommit=self.commit, sourceTree=self.tree,
@@ -309,7 +377,7 @@ class CreateProof(unittest.TestCase):
     def test_create_proofs_from_real_files_git_and_exact_junit_then_combine(self):
         first = P.create_proof(self.args, ENV); self.select('companion'); second = P.create_proof(self.args, ENV)
         combined = P.combine(first, second, ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
-        self.assertEqual(combined['passedGroupCount'], P.PLATFORMS[self.platform][0])
+        self.assertEqual(combined['passedGroupCount'], P.PLATFORMS[self.platform][0] + (self.schema_version == 2))
         self.assertNotIn(str(self.root), json.dumps(first)); self.assertNotIn('native_ui', json.dumps(first))
 
     def test_driver_stale_source_attempt_partial_or_unstable_inputs_fail(self):
@@ -377,6 +445,38 @@ class CreateProof(unittest.TestCase):
         self.assertNotEqual(a[2], b[2])
         registration = copy.deepcopy(self.registration); registration['tests'][0]['properties'].append({'name': 'COST', 'value': 100})
         self.assertEqual(a[3], P.build_identity(self.source, self.build, self.sdk, self.cache, registration)[3])
+
+
+class CreateTelemetryProof(CreateProof):
+    schema_version = 2
+
+    def test_effective_endpoint_and_automatic_build_label_must_match_between_shards(self):
+        # Both caches leave the override label empty, as a normal automatic
+        # Git-derived build does. Only the generated header holds that label.
+        self.cache['MCL_TELEMETRY_BUILD_LABEL'] = ''
+        self.put(self.build / 'CMakeCache.txt', '\n'.join(k + ':STRING=' + v for k, v in self.cache.items()))
+        first = P.create_proof(self.args, ENV)
+        self.select('companion')
+        header = self.build / 'generated/telemetry_build_config.h'
+        original = header.read_text()
+        for changed in (original.replace('telemetry.example.invalid', 'other.example.invalid'),
+                        original.replace('fixture-effective-sha', 'different-effective-sha')):
+            self.put(header, changed)
+            second = P.create_proof(self.args, ENV)
+            self.assertNotEqual(first['configSha256'], second['configSha256'])
+            self.assertEqual(first['sourceInputsSha256'], second['sourceInputsSha256'])
+            with self.assertRaisesRegex(P.ProofError, 'SHARD_IDENTITY_MISMATCH'):
+                P.combine(first, second, ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
+
+    def test_missing_effective_telemetry_header_blocks_proof(self):
+        (self.build / 'generated/telemetry_build_config.h').unlink()
+        with self.assertRaisesRegex(P.ProofError, 'TELEMETRY_CONFIGURATION_MISSING'):
+            P.create_proof(self.args, ENV)
+
+    def test_telemetry_requires_current_executable_and_complete_registration(self):
+        self.registration['tests'] = [t for t in self.registration['tests'] if t['name'] != 'telemetry']
+        with self.assertRaisesRegex(P.ProofError, 'INCOMPLETE_REGISTRATION'):
+            P.create_proof(self.args, ENV)
 
 
 if __name__ == '__main__':

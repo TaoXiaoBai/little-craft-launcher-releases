@@ -19,6 +19,7 @@ SPEC.loader.exec_module(runner)
 PLAN = {'schemaVersion': 1,
         'primaryUi': ['ui_regression', 'winmd_ui', 'populated_ui', 'theme_controls'],
         'companionUi': ['local_ui', 'native_ui', 'mod_favorites_ui', 'crash_notification_ui', 'external_auth_ui']}
+PLAN_V2 = {**PLAN, 'schemaVersion': 2, 'extraBackendGroups': ['telemetry']}
 
 
 class Fixture(unittest.TestCase):
@@ -120,6 +121,18 @@ raise SystemExit(int(os.environ.get('FIXTURE_EXIT','0')))
     def write_registration(self):
         (self.build/'registration.fixture.json').write_text(json.dumps(self.registration))
 
+    def enable_telemetry_plan(self):
+        (self.native/'tests/ci/ui-shard-plan.json').write_text(json.dumps(PLAN_V2))
+        binary = self.build/'telemetry_tests'
+        binary.write_text('owned compiled fixture: telemetry')
+        binary.chmod(0o700)
+        self.registration['tests'].append({'name': 'telemetry', 'command': [str(binary)],
+            'properties': [{'name': 'TIMEOUT', 'value': 180},
+                           {'name': 'WORKING_DIRECTORY', 'value': str(self.build)}]})
+        self.write_registration()
+        self.git('add', '.')
+        self.git('commit', '-qm', 'Owned telemetry fixture')
+
     def run_shard(self, shard='primary', **environment):
         args = argparse.Namespace(source_root=self.source, build_dir=self.build, shard=shard,
                                   junit=self.logs/'ctest.xml', result_json=self.logs/'test-result.json', ctest=str(self.ctest))
@@ -147,6 +160,39 @@ raise SystemExit(int(os.environ.get('FIXTURE_EXIT','0')))
         self.assertEqual(code, 0)
         self.assertEqual(len(result['selectedTestGroups']), 5)
         self.assertEqual(set(result['selectedTestGroups']), set(PLAN['companionUi']))
+
+    def test_schema2_primary_executes_telemetry_and_every_legacy_backend(self):
+        self.enable_telemetry_plan()
+        code, result = self.run_shard()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(result['tests']), 45)
+        self.assertEqual(result['ctestValidation']['count'], 40)
+        self.assertEqual(set(result['selectedTestGroups']), runner.BACKEND_GROUPS | {'telemetry'} | set(PLAN['primaryUi']))
+        self.assertEqual(set(result['expectedTestGroups']), runner.EXPECTED_GROUPS | {'telemetry'})
+
+    def test_schema2_companion_keeps_original_five_ui_groups(self):
+        self.enable_telemetry_plan()
+        code, result = self.run_shard('companion')
+        self.assertEqual(code, 0)
+        self.assertEqual(set(result['selectedTestGroups']), set(PLAN['companionUi']))
+        self.assertEqual(len(result['tests']), 45)
+
+    def test_schema2_rejects_missing_replaced_extra_and_filtered_telemetry(self):
+        expected = runner.EXPECTED_GROUPS | {'telemetry'}
+        for names in (runner.EXPECTED_GROUPS, expected | {'surprise'}, (expected - {'auth'}) | {'surprise'}):
+            with self.subTest(names=names), self.assertRaises(runner.ShardError):
+                runner.select_groups(PLAN_V2, sorted(names), 'primary')
+        self.enable_telemetry_plan()
+        telemetry = next(t for t in self.registration['tests'] if t['name'] == 'telemetry')
+        telemetry['command'].append('oneFunctionOnly')
+        with self.assertRaisesRegex(runner.ShardError, 'FILTERED_CTEST_COMMAND'):
+            runner.collect_identities(self.registration, self.source, self.build, self.cache, PLAN_V2)
+
+    def test_schema2_rejects_unapproved_extensions(self):
+        for value in ([], ['auth'], ['telemetry', 'auth'], ['telemetry', 'telemetry'], 'telemetry', [True]):
+            with self.subTest(extra=value), self.assertRaises(runner.ShardError):
+                runner.select_groups(dict(PLAN_V2, extraBackendGroups=value),
+                                     sorted(runner.EXPECTED_GROUPS | {'telemetry'}), 'primary')
 
     def test_shard_union_is_exact_and_disjoint(self):
         names = sorted(runner.EXPECTED_GROUPS)

@@ -22,6 +22,9 @@ on:
         required: false
         type: string
 
+env:
+  MCL_TELEMETRY_ENDPOINT: ${{ vars.TELEMETRY_ENDPOINT }}
+
 permissions:
   contents: read
 
@@ -81,6 +84,8 @@ jobs:
           if ($parseErrors.Count -or -not (Test-Path -LiteralPath $plan -PathType Leaf) -or $parameters -cnotcontains 'TestShard') {
             throw 'This tag needs a reviewed CI-only source_ref containing shard support. Production inputs must still match the tag.'
           }
+          & python builder/.github/scripts/ci_test_proof.py validate-plan --plan $plan
+          if ($LASTEXITCODE -ne 0) { throw 'The source shard plan is invalid or unsupported.' }
           Write-Output 'Reviewed test shard support is available.'
 
       - name: Cache verified public Windows toolchain archives
@@ -256,22 +261,8 @@ jobs:
 
       - name: Require reviewed shard-capable source
         run: |
-          python - <<'PYCODE'
-          import json, os, sys
-          from pathlib import Path
-          try:
-              plan = json.loads((Path(os.environ['GITHUB_WORKSPACE']) / 'source/qt-native/tests/ci/ui-shard-plan.json').read_text())
-              if set(plan) != {'schemaVersion', 'primaryUi', 'companionUi'} or type(plan['schemaVersion']) is not int or plan['schemaVersion'] != 1:
-                  raise ValueError()
-              if not all(type(plan[key]) is list for key in ('primaryUi', 'companionUi')):
-                  raise ValueError()
-              names = plan['primaryUi'] + plan['companionUi']
-              if len(plan['primaryUi']) != 4 or len(plan['companionUi']) != 5 or any(type(name) is not str for name in names) or len(set(names)) != 9:
-                  raise ValueError()
-          except Exception:
-              sys.exit('This tag needs a reviewed CI-only source_ref containing shard support. Production inputs must still match the tag.')
-          print('Reviewed test shard support is available.')
-          PYCODE
+          python builder/.github/scripts/ci_test_proof.py validate-plan \
+            --plan "$GITHUB_WORKSPACE/source/qt-native/tests/ci/ui-shard-plan.json"
 
       - name: Restore the five pinned public Qt source archives
         id: qt-source-archives
@@ -514,6 +505,8 @@ jobs:
           if ($parseErrors.Count -or -not (Test-Path -LiteralPath $plan -PathType Leaf) -or $parameters -cnotcontains 'TestShard') {
             throw 'This tag needs a reviewed CI-only source_ref containing shard support. Production inputs must still match the tag.'
           }
+          & python builder/.github/scripts/ci_test_proof.py validate-plan --plan $plan
+          if ($LASTEXITCODE -ne 0) { throw 'The source shard plan is invalid or unsupported.' }
           Write-Output 'Reviewed test shard support is available.'
 
       - name: Restore verified public Windows toolchain archives
@@ -628,22 +621,8 @@ jobs:
 
       - name: Require reviewed shard-capable source
         run: |
-          python - <<'PYCODE'
-          import json, os, sys
-          from pathlib import Path
-          try:
-              plan = json.loads((Path(os.environ['GITHUB_WORKSPACE']) / 'source/qt-native/tests/ci/ui-shard-plan.json').read_text())
-              if set(plan) != {'schemaVersion', 'primaryUi', 'companionUi'} or type(plan['schemaVersion']) is not int or plan['schemaVersion'] != 1:
-                  raise ValueError()
-              if not all(type(plan[key]) is list for key in ('primaryUi', 'companionUi')):
-                  raise ValueError()
-              names = plan['primaryUi'] + plan['companionUi']
-              if len(plan['primaryUi']) != 4 or len(plan['companionUi']) != 5 or any(type(name) is not str for name in names) or len(set(names)) != 9:
-                  raise ValueError()
-          except Exception:
-              sys.exit('This tag needs a reviewed CI-only source_ref containing shard support. Production inputs must still match the tag.')
-          print('Reviewed test shard support is available.')
-          PYCODE
+          python builder/.github/scripts/ci_test_proof.py validate-plan \
+            --plan "$GITHUB_WORKSPACE/source/qt-native/tests/ci/ui-shard-plan.json"
 
       - name: Install Linux build dependencies
         run: |

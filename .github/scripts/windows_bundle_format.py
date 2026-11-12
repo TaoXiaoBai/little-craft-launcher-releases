@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import stat
 import struct
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 
@@ -27,6 +28,7 @@ MAX_INDEX = 16 * 1024 * 1024
 MAX_FILES = 20000
 MAX_PATH = 4096
 MAX_EXE = MAX_PAYLOAD + MAX_INDEX + 64 * 1024 * 1024
+MAX_MANIFEST = 64 * 1024
 ENTRYPOINT = "mclauncher-qt.exe"
 QT_VERSION = "6.8.3"
 INDEX_RESOURCE = 21001
@@ -62,6 +64,17 @@ def _tag(tag):
     _require(isinstance(tag, str) and len(tag) <= 128 and TAG_PATTERN.fullmatch(tag),
              "Invalid bundle release tag")
     return tag.encode("ascii")
+
+
+def explicit_privileges_required(tag):
+    """Freeze old releases; pre.11 and subsequent versions declare both tokens."""
+    _tag(tag)
+    match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([A-Za-z0-9.-]+))?", tag)
+    version = tuple(int(match[index]) for index in (1, 2, 3))
+    if version < (1, 0, 0):
+        return False
+    old_preview = re.fullmatch(r"pre\.([0-9]+)", match[4] or "")
+    return not (version == (1, 0, 0) and old_preview and int(old_preview[1]) <= 10)
 
 
 def _path(name, directory=False):
@@ -342,7 +355,9 @@ def _runtime(data, tag):
              "Runtime checksums differ from ZIP bytes")
     # The existing dynamic Qt target is a console-subsystem PE; the GUI-only
     # requirement applies to the native outer bootstrap, which hides its loader.
-    _PE(captured[ENTRYPOINT], require_gui=False)
+    inner = _PE(captured[ENTRYPOINT], require_gui=False)
+    if explicit_privileges_required(tag):
+        inner.require_as_invoker_manifest()
     legal, unused = _zip_inventory(captured["SUPPORTING_MATERIALS.zip"])
     _require(bool(legal), "Supporting materials are empty")
     return records, manifest
@@ -489,13 +504,15 @@ class _PE:
                     raise BundleError("Unterminated PE import table")
         raise BundleError("Unterminated PE import directory")
 
-    def resources(self):
+    def _resource_entries(self, require_resources=True):
         root, length = self.directory(2)
+        if not root and not require_resources:
+            return [], []
         _require(root and 16 <= length <= len(self.data), "Missing PE resources")
         base = self.rva(root, length)
         visited = set()
         metadata = []
-        selected = {}
+        leaves = []
         count = 0
 
         def bound(offset, size):
@@ -542,16 +559,23 @@ class _PE:
                     _require(reserved == 0 and size > 0 and root <= data_rva
                              and size <= root + length - data_rva, "Invalid PE resource data bounds")
                     start = self.rva(data_rva, size)
-                    if path[0] == ("id", 10):
-                        _require(path[1][0] == "id" and path[1][1] in (INDEX_RESOURCE, PAYLOAD_RESOURCE),
-                                 "Unexpected bootstrap RCDATA resource")
-                        _require(codepage == 0 and size <= (MAX_INDEX if path[1][1] == INDEX_RESOURCE else MAX_PAYLOAD),
-                                 "Bundle resource exceeds its bound or has a non-neutral codepage")
-                        _require(path[2] == ("id", 0) and path[1][1] not in selected,
-                                 "Bundle resource must have one neutral language")
-                        selected[path[1][1]] = (data_rva - root, size, start)
+                    leaves.append((path, codepage, size, data_rva - root, start))
 
         walk(0, ())
+        return metadata, leaves
+
+    def resources(self):
+        metadata, leaves = self._resource_entries()
+        selected = {}
+        for path, codepage, size, offset, start in leaves:
+            if path[0] == ("id", 10):
+                _require(path[1][0] == "id" and path[1][1] in (INDEX_RESOURCE, PAYLOAD_RESOURCE),
+                         "Unexpected bootstrap RCDATA resource")
+                _require(codepage == 0 and size <= (MAX_INDEX if path[1][1] == INDEX_RESOURCE else MAX_PAYLOAD),
+                         "Bundle resource exceeds its bound or has a non-neutral codepage")
+                _require(path[2] == ("id", 0) and path[1][1] not in selected,
+                         "Bundle resource must have one neutral language")
+                selected[path[1][1]] = (offset, size, start)
         _require(set(selected) == {INDEX_RESOURCE, PAYLOAD_RESOURCE}, "Missing bundle RCDATA resources")
         for offset, size, unused in selected.values():
             _require(all(not self.overlaps(offset, size, start, count) for start, count in metadata),
@@ -560,11 +584,49 @@ class _PE:
         _require(not self.overlaps(first[0], first[1], second[0], second[1]), "Bundle resources overlap")
         return {key: self.data[start:start + size] for key, (unused, size, start) in selected.items()}
 
+    def require_as_invoker_manifest(self):
+        """Check the actual application manifest, not version/company text."""
+        metadata, leaves = self._resource_entries(require_resources=False)
+        manifests = [leaf for leaf in leaves if leaf[0][0] == ("id", 24)]
+        _require(len(manifests) == 1, "Expected exactly one Windows application manifest")
+        path, unused, size, offset, start = manifests[0]
+        _require(path[1] == ("id", 1) and path[2][0] == "id" and size <= MAX_MANIFEST,
+                 "Invalid Windows application manifest identity or size")
+        _require(all(not self.overlaps(offset, size, begin, count) for begin, count in metadata),
+                 "Windows application manifest overlaps resource metadata")
+        blob = self.data[start:start + size]
+        try:
+            # The release RC files embed UTF-8 XML. UTF-16 with a BOM is also
+            # understood without allowing a DTD/entity expansion or external data.
+            text = blob.decode("utf-16" if blob.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig", "strict")
+            _require("<!DOCTYPE" not in text.upper() and "<!ENTITY" not in text.upper(),
+                     "Windows application manifest must not declare entities")
+            document = ET.fromstring(text)
+        except (UnicodeError, ET.ParseError, ValueError) as error:
+            raise BundleError("Invalid Windows application manifest XML") from error
+        ns = "{urn:schemas-microsoft-com:asm.v3}"
+        _require(document.tag == "{urn:schemas-microsoft-com:asm.v1}assembly"
+                 and document.get("manifestVersion") == "1.0",
+                 "Invalid Windows application manifest namespace")
+        scope = document
+        for name in ("trustInfo", "security", "requestedPrivileges"):
+            children = scope.findall(ns + name)
+            _require(len(children) == 1, "Expected one Windows privilege declaration")
+            scope = children[0]
+        levels = document.findall(f"{ns}trustInfo/{ns}security/{ns}requestedPrivileges/{ns}requestedExecutionLevel")
+        all_levels = [node for node in document.iter() if node.tag.split("}")[-1] == "requestedExecutionLevel"]
+        _require(len(levels) == 1 and len(all_levels) == 1,
+                 "Expected one Windows requestedExecutionLevel")
+        _require(levels[0].get("level") == "asInvoker" and levels[0].get("uiAccess") == "false",
+                 "Windows executable must declare asInvoker and uiAccess=false")
+
 
 def inspect_bundle(exe, tag):
     """Validate the complete outer PE, index, runtime ZIP and metadata."""
     _tag(tag)
     pe = _PE(_data(exe, MAX_EXE))
+    if explicit_privileges_required(tag):
+        pe.require_as_invoker_manifest()
     imports = pe.imports()
     resources = pe.resources()
     index = parse_index(resources[INDEX_RESOURCE], tag)
