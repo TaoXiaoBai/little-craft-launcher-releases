@@ -14,6 +14,12 @@ inputs:
     description: Optional full commit SHA for reviewed test-only fixes
     required: false
     default: ''
+  source_commit:
+    description: >-
+      Release commit pinned by the workflow's resolve-source job when the private
+      repository has no tag with this version. Empty when the tag exists.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -24,8 +30,20 @@ runs:
         SOURCE_READ_TOKEN: ${{ inputs.source_read_token }}
         VERSION_TAG: ${{ inputs.tag }}
         TEST_SOURCE_REF: ${{ inputs.source_ref }}
+        PINNED_SOURCE_COMMIT: ${{ inputs.source_commit }}
       run: |
         $ErrorActionPreference = 'Stop'
+        if ($env:PINNED_SOURCE_COMMIT) {
+          if ($env:PINNED_SOURCE_COMMIT -cnotmatch '\A[0-9a-f]{40}\z') {
+            throw 'The pinned release commit must be a full commit SHA.'
+          }
+          # A test-only override is compared against an immutable tag; a release
+          # built from a pinned commit has no tag to compare with.
+          if ($env:TEST_SOURCE_REF) {
+            throw 'A test-only source override requires a version tag in the private source.'
+          }
+          Write-Output "::add-mask::$($env:PINNED_SOURCE_COMMIT)"
+        }
         if ($env:VERSION_TAG -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+\z') {
           throw 'A prerelease tag such as v1.0.0-pre.1 is required.'
         }
@@ -45,7 +63,7 @@ runs:
       with:
         repository: ${{ inputs.source_repository }}
         token: ${{ inputs.source_read_token }}
-        ref: ${{ inputs.source_ref || format('refs/tags/{0}', inputs.tag) }}
+        ref: ${{ inputs.source_ref || inputs.source_commit || format('refs/tags/{0}', inputs.tag) }}
         path: source
         fetch-depth: 1
         persist-credentials: false
