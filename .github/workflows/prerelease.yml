@@ -51,6 +51,22 @@ jobs:
     outputs:
       commit: ${{ steps.resolve.outputs.commit }}
     steps:
+      - name: Checkout public release preflight
+        if: inputs.platform == 'both' || !inputs.platform
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Reject an occupied release version
+        if: inputs.platform == 'both' || !inputs.platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ inputs.tag }}
+          RELEASE_PLATFORM: ${{ inputs.platform || 'both' }}
+        run: |
+          python3 builder/.github/scripts/release_preflight.py --tag "$VERSION_TAG" --platform "$RELEASE_PLATFORM"
+
       - name: Resolve the private tag or pin the default branch
         id: resolve
         shell: bash
