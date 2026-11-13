@@ -102,3 +102,19 @@ openssl cms -decrypt -binary -inform DER -in diagnostics.p7m \
 Decrypted diagnostics can contain private application source lines. Keep them
 private. Replacing the certificate is necessary when changing operators or if
 the matching private key is lost. The public workflow cannot recover that key.
+
+## Android client preview
+
+**Android build** (manual, default branch only) builds the Android client
+preview from the private source with the same two Actions secrets. Give
+`source_ref` a full commit SHA to build a branch that is not yet on `master`.
+It installs Qt 6.8.3 for Android ARM64 with the matching desktop kit through
+aqtinstall 3.3.0, Android platform 35, build tools 35.0.1, NDK 26.1.10909125 and
+a pinned KDAB android_openssl commit; runs the host client tests; then builds an
+arm64-v8a **debug** APK and checks that it carries the OpenSSL libraries. The
+job summary records the APK size and SHA-256. The APK is uploaded as a 7-day
+artifact only when `upload_apk` is selected, because artifacts of this public
+repository are public. It is not signed for release and is not published.
+
+The preview downloads and verifies vanilla game files but cannot start
+Minecraft on Android yet, and it stores no accounts.
