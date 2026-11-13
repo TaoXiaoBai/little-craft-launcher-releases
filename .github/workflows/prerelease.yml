@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing private source tag, for example v1.0.0-pre.1'
+        description: 'Version to release, for example v1.0.0-pre.12. Builds the private tag of that name, or the current default branch when no such tag exists'
         required: true
         type: string
       platform:
@@ -35,11 +35,57 @@ concurrency:
   cancel-in-progress: ${{ inputs.platform == 'windows' || inputs.platform == 'linux' }}
 
 jobs:
+  # One place decides what every job builds. A tag in the private source is
+  # used when it exists; otherwise the default branch head is resolved once and
+  # all jobs build that same commit, so a release needs no hand-made tag and
+  # cannot mix revisions when the branch moves during the run.
+  resolve-source:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Resolve source revision
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - name: Resolve the private tag or pin the default branch
+        id: resolve
+        shell: bash
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+$ ]]; then
+            echo 'A prerelease version such as v1.0.0-pre.1 is required.'; exit 1
+          fi
+          if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$ || -z "$SOURCE_READ_TOKEN" ]]; then
+            echo 'Configure SOURCE_REPOSITORY and SOURCE_READ_TOKEN in repository Actions secrets.'; exit 1
+          fi
+          authorization=$(printf 'x-access-token:%s' "$SOURCE_READ_TOKEN" | base64 -w0)
+          echo "::add-mask::$authorization"
+          if ! refs=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+                ls-remote "https://github.com/$SOURCE_REPOSITORY" HEAD "refs/tags/$VERSION_TAG" 2>/dev/null); then
+            echo 'The private source could not be read.'; exit 1
+          fi
+          if awk -v ref="refs/tags/$VERSION_TAG" '$2 == ref { found = 1 } END { exit !found }' <<<"$refs"; then
+            echo 'The private source has a tag with this version; every job builds that tag.'
+            echo 'commit=' >> "$GITHUB_OUTPUT"
+          else
+            commit=$(awk '$2 == "HEAD" { print $1 }' <<<"$refs")
+            if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'The default branch of the private source could not be resolved.'; exit 1
+            fi
+            echo 'No private tag with this version; every job builds the same pinned default-branch commit.'
+            echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          fi
+
   # Main and companion runners compile independently from the same immutable
   # inputs. Only a verified complete union may upload a runtime package; no
   # private source, build tree or executable is transferred between runners.
   build-windows:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'windows' || !inputs.platform)
+    needs: resolve-source
     name: Build windows-x64
     runs-on: windows-2022
     timeout-minutes: 90
@@ -70,6 +116,7 @@ jobs:
           source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
           tag: ${{ inputs.tag }}
           source_ref: ${{ inputs.source_ref }}
+          source_commit: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Require reviewed shard-capable source
         shell: pwsh
@@ -238,6 +285,7 @@ jobs:
 
   build-linux:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'linux' || !inputs.platform)
+    needs: resolve-source
     name: Build linux-x86_64
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -258,6 +306,7 @@ jobs:
           source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
           tag: ${{ inputs.tag }}
           source_ref: ${{ inputs.source_ref }}
+          source_commit: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Require reviewed shard-capable source
         run: |
@@ -474,6 +523,7 @@ jobs:
 
   test-windows-companion:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'windows' || !inputs.platform)
+    needs: resolve-source
     name: Test windows-x64 companion UI
     runs-on: windows-2022
     timeout-minutes: 90
@@ -491,6 +541,7 @@ jobs:
           source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
           tag: ${{ inputs.tag }}
           source_ref: ${{ inputs.source_ref }}
+          source_commit: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Require reviewed shard-capable source
         shell: pwsh
@@ -601,6 +652,7 @@ jobs:
 
   test-linux-companion:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || inputs.platform == 'linux' || !inputs.platform)
+    needs: resolve-source
     name: Test linux-x86_64 companion UI
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -618,6 +670,7 @@ jobs:
           source_read_token: ${{ secrets.SOURCE_READ_TOKEN }}
           tag: ${{ inputs.tag }}
           source_ref: ${{ inputs.source_ref }}
+          source_commit: ${{ needs.resolve-source.outputs.commit }}
 
       - name: Require reviewed shard-capable source
         run: |

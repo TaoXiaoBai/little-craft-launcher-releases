@@ -4,17 +4,19 @@ The public repository contains packaging tools and project information. It does
 not contain the launcher's application source. The release workflow runs only
 when manually dispatched on the default branch.
 
-1. Create an immutable prerelease tag in the private source repository, such as
-   `v1.0.0-pre.5`. Both platforms check out that exact tag; the optional
-   `SOURCE_REF` used by the older access-check workflow is not used here.
-   An optional full `source_ref` commit may supply a reviewed test-only fix.
-   The private-source comparison gate rejects application, resource and runtime
-   toolchain changes; any test-configuration exception must match its explicitly
-   reviewed inputs. This override is not a way to ship different application code.
+1. Choose the next version, such as `v1.0.0-pre.12`, and optionally add
+   `.github/release-notes/<version>.md` here with the user-facing changes.
+   No tag has to be created by hand: the workflow's first job looks for a tag
+   of that name in the private source and builds it when present; otherwise it
+   resolves the private default branch once and every job builds that same
+   pinned commit. The optional full `source_ref` commit, which may supply a
+   reviewed test-only fix, still requires such a tag, because the comparison
+   gate checks the override against it and rejects application, resource and
+   runtime toolchain changes.
 2. Keep `SOURCE_REPOSITORY` and the repository-scoped, Contents-read
    `SOURCE_READ_TOKEN` in this repository's Actions secrets. The source checkout
    never persists the token. No source-write token is required by CI.
-3. Run **Windows and Linux prerelease**, specifying that tag. Windows uses the
+3. Run **Windows and Linux prerelease**, specifying that version. Windows uses the
    source repository's hash-locked Qt 6.8.3 / MinGW toolchain and its complete
    required local test suite. Linux uses Qt 6.8.3, including Qt Wayland and QtDBus,
    on Ubuntu 22.04 and runs the complete discovered local CTest suite. Both
