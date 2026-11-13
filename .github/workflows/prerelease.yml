@@ -21,6 +21,10 @@ on:
         description: 'Reviewed CI-only SHA required for old tags without shard support; production inputs must still match the release tag'
         required: false
         type: string
+      source_commit:
+        description: 'Test runs only (windows or linux, never published): full private commit SHA to build instead of the tag or default branch'
+        required: false
+        type: string
 
 env:
   MCL_TELEMETRY_ENDPOINT: ${{ vars.TELEMETRY_ENDPOINT }}
@@ -54,8 +58,20 @@ jobs:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
           VERSION_TAG: ${{ inputs.tag }}
+          REQUESTED_COMMIT: ${{ inputs.source_commit }}
+          PLATFORM: ${{ inputs.platform || 'both' }}
         run: |
           set -euo pipefail
+          if [[ -n "$REQUESTED_COMMIT" ]]; then
+            # A chosen commit is for checking a fix on one platform. A published
+            # release always comes from the tag or the default branch.
+            if [[ "$PLATFORM" == 'both' || ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'source_commit needs a full commit SHA and a single platform; it is never published.'; exit 1
+            fi
+            echo 'Building the requested commit for a single-platform test run.'
+            echo "commit=$REQUESTED_COMMIT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ ! "$VERSION_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(pre|alpha|beta|rc)\.[0-9]+$ ]]; then
             echo 'A prerelease version such as v1.0.0-pre.1 is required.'; exit 1
           fi
