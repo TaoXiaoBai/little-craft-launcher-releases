@@ -1,0 +1,450 @@
+From 2ee14cdfb1e5153022ed4cf0c775f753471dc82d Mon Sep 17 00:00:00 2001
+From: Tao Xiaobai <1599170798@qq.com>
+Date: Sat, 14 Nov 2026 15:41:54 +0000
+Subject: [PATCH 4/4] Little Craft Launcher: a preparation ends only when its
+ asynchronous tasks have
+
+Component unpacking queued its work on the executor and returned, so the
+preparation could be reported cancelled or failed, and a retry accepted, while
+the old task was still deleting and copying the shared component directories.
+
+- AsyncAssetManager: synchronous unpackComponentsNow / unpackSingleFilesNow
+  (the asynchronous entry points delegate to them and now always clear their
+  progress). The entry activity uses them, so that work is inside the
+  preparation's own call.
+- LclPreparation takes a Settle that blocks until nothing the work started is
+  still running; it is awaited on every path before the exclusive lock is
+  released and before any final state is reported. The entry activity waits
+  for the runtime's progress keeper to be idle.
+- Regressions: outer work exited (cancelled / failed / succeeded) while an
+  asynchronous child still writes, leave, retry at once.
+---
+ .../pojavlaunch/lcl/LclGameEntryActivity.java |  21 ++-
+ .../kdt/pojavlaunch/lcl/LclPreparation.java   |  30 +++-
+ .../pojavlaunch/tasks/AsyncAssetManager.java  |  83 ++++++-----
+ .../pojavlaunch/lcl/LclPreparationTest.java   | 130 ++++++++++++++++--
+ 4 files changed, 216 insertions(+), 48 deletions(-)
+
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+index 2d031db..7f54383 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+@@ -98,7 +98,7 @@ public class LclGameEntryActivity extends AppCompatActivity {
+                     failure[0] = throwable;
+                     throw throwable;
+                 }
+-            }, mCancellation, this::report);
++            }, mCancellation, LclGameEntryActivity::awaitRuntimeIdle, this::report);
+             if (outcome == LclPreparation.Outcome.PREPARED) {
+                 launchWhenReady(request);
+             } else if (outcome == LclPreparation.Outcome.FAILED) {
+@@ -120,6 +120,17 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         super.onDestroy();
+     }
+ 
++    /**
++     * Blocks until the runtime has no task in progress. Everything the runtime
++     * runs in the background for a preparation registers with ProgressKeeper
++     * before it is queued, so this also covers work started outside prepare().
++     */
++    private static void awaitRuntimeIdle() throws InterruptedException {
++        final java.util.concurrent.CountDownLatch idle = new java.util.concurrent.CountDownLatch(1);
++        ProgressKeeper.waitUntilDone(idle::countDown);
++        idle.await();
++    }
++
+     /** Tells the host, once, how this hand-over ended. */
+     private synchronized void report(String state, String message) {
+         if (mReported) return;
+@@ -284,8 +295,12 @@ public class LclGameEntryActivity extends AppCompatActivity {
+ 
+         cancellation.check();
+         setStatus("Unpacking runtime components…");
+-        AsyncAssetManager.unpackComponents(this);
+-        AsyncAssetManager.unpackSingleFiles(this);
++        // On this thread, finished when they return: the asynchronous variants
++        // would keep writing the shared component directories after this
++        // preparation had already been reported as over.
++        AsyncAssetManager.unpackComponentsNow(this);
++        cancellation.check();
++        AsyncAssetManager.unpackSingleFilesNow(this);
+ 
+         // The runtime's own account record for this player.
+         MinecraftAccount account = new MinecraftAccount();
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
+index 62174d4..6b64379 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
+@@ -10,6 +10,10 @@ import java.util.concurrent.locks.ReentrantLock;
+  *
+  * - Preparations share files (the Java runtime archive and directory, library
+  *   downloads), so only one runs in the process at a time.
++ * - The work may have started asynchronous tasks that outlive its own call
++ *   (anything the runtime runs on its executor). The preparation is only over
++ *   when those have ended too: {@link Settle} waits for them on every path,
++ *   success, failure and cancellation alike.
+  * - Leaving the preparation screen only asks the work to stop. "cancelled" is
+  *   reported when the work has actually stopped, never before: until then the
+  *   host keeps the instance protected and accepts no new start that could
+@@ -26,6 +30,11 @@ public final class LclPreparation {
+         void run(Cancellation cancellation) throws Throwable;
+     }
+ 
++    /** Blocks until nothing the work started is still running. */
++    public interface Settle {
++        void awaitQuiet() throws InterruptedException;
++    }
++
+     public static final class Cancellation {
+         private final AtomicBoolean mRequested = new AtomicBoolean();
+ 
+@@ -63,7 +72,7 @@ public final class LclPreparation {
+      *           Nothing is reported for the session that is still preparing
+      *           (its own task will end it); any other session gets "failed".
+      */
+-    public static Outcome run(String sessionId, Work work, Cancellation cancellation, Reporter reporter) {
++    public static Outcome run(String sessionId, Work work, Cancellation cancellation, Settle settle, Reporter reporter) {
+         if (!sExclusive.tryLock()) {
+             String active = sActiveSession;
+             if (sessionId == null || !sessionId.equals(active))
+@@ -93,14 +102,31 @@ public final class LclPreparation {
+                 message = reason == null || reason.isEmpty() ? throwable.getClass().getSimpleName() : firstLine(reason);
+             }
+         } finally {
++            // Whatever the outcome, the shared files stay ours until every
++            // asynchronous task the work started has ended as well.
++            awaitQuiet(settle);
+             sActiveSession = null;
+             sExclusive.unlock();
+         }
+-        // Reported only now: the work has stopped and released the shared files.
++        // Reported only now: the work and everything it started have stopped
++        // and released the shared files.
+         if (state != null) reporter.report(state, message);
+         return outcome;
+     }
+ 
++    private static void awaitQuiet(Settle settle) {
++        boolean interrupted = false;
++        while (true) {
++            try {
++                settle.awaitQuiet();
++                break;
++            } catch (InterruptedException e) {
++                interrupted = true; // keep waiting: releasing early is the bug
++            }
++        }
++        if (interrupted) Thread.currentThread().interrupt();
++    }
++
+     static String firstLine(String text) {
+         int end = text.indexOf('\n');
+         String line = end < 0 ? text : text.substring(0, end);
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/tasks/AsyncAssetManager.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/tasks/AsyncAssetManager.java
+index 8a24841..d778745 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/tasks/AsyncAssetManager.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/tasks/AsyncAssetManager.java
+@@ -66,49 +66,62 @@ public class AsyncAssetManager {
+     /** Unpack single files, with no regard to version tracking */
+     public static void unpackSingleFiles(Context ctx){
+         ProgressLayout.setProgress(ProgressLayout.EXTRACT_SINGLE_FILES, 0);
+-        sExecutorService.execute(() -> {
+-            try {
+-                Tools.copyAssetFile(ctx, "options.txt", Tools.DIR_GAME_NEW, false);
+-
+-                // This is disgusting, but am lazy. We probably wont be getting any updates to
+-                // controlmap till rewrite anyway so this is fiiine.
+-                try (InputStream is = ctx.getAssets().open("default.json")) {
+-                    String assetSha1 = new String(org.apache.commons.codec.binary.Hex.encodeHex(org.apache.commons.codec.digest.DigestUtils.sha1(is)));
+-                    if (!Tools.compareSHA1(new File(Tools.CTRLDEF_FILE), assetSha1)) {
+-                        Tools.copyAssetFile(ctx, "default.json", Tools.CTRLMAP_PATH, "new_default.json" , false);
+-                    } else if (!new File(Tools.CTRLMAP_PATH+"/new_default.json").exists())
+-                    Tools.copyAssetFile(ctx, "default.json", Tools.CTRLMAP_PATH, false);
+-                }
++        sExecutorService.execute(() -> unpackSingleFilesNow(ctx));
++    }
+ 
+-                Tools.copyAssetFile(ctx, "launcher_profiles.json", Tools.DIR_GAME_NEW, false);
+-                Tools.copyAssetFile(ctx,"resolv.conf",Tools.DIR_DATA, false);
+-            } catch (IOException e) {
+-                Log.e("AsyncAssetManager", "Failed to unpack critical components !");
++    /**
++     * Little Craft Launcher: the same work on the calling thread, finished when
++     * this returns, so a caller can know that nothing is still writing.
++     */
++    public static void unpackSingleFilesNow(Context ctx){
++        ProgressLayout.setProgress(ProgressLayout.EXTRACT_SINGLE_FILES, 0);
++        try {
++            Tools.copyAssetFile(ctx, "options.txt", Tools.DIR_GAME_NEW, false);
++
++            // This is disgusting, but am lazy. We probably wont be getting any updates to
++            // controlmap till rewrite anyway so this is fiiine.
++            try (InputStream is = ctx.getAssets().open("default.json")) {
++                String assetSha1 = new String(org.apache.commons.codec.binary.Hex.encodeHex(org.apache.commons.codec.digest.DigestUtils.sha1(is)));
++                if (!Tools.compareSHA1(new File(Tools.CTRLDEF_FILE), assetSha1)) {
++                    Tools.copyAssetFile(ctx, "default.json", Tools.CTRLMAP_PATH, "new_default.json" , false);
++                } else if (!new File(Tools.CTRLMAP_PATH+"/new_default.json").exists())
++                Tools.copyAssetFile(ctx, "default.json", Tools.CTRLMAP_PATH, false);
+             }
++
++            Tools.copyAssetFile(ctx, "launcher_profiles.json", Tools.DIR_GAME_NEW, false);
++            Tools.copyAssetFile(ctx,"resolv.conf",Tools.DIR_DATA, false);
++        } catch (IOException e) {
++            Log.e("AsyncAssetManager", "Failed to unpack critical components !");
++        } finally {
+             ProgressLayout.clearProgress(ProgressLayout.EXTRACT_SINGLE_FILES);
+-        });
++        }
+     }
+ 
+     public static void unpackComponents(Context ctx){
+         ProgressLayout.setProgress(ProgressLayout.EXTRACT_COMPONENTS, 0);
+-        sExecutorService.execute(() -> {
+-            try {
+-                unpackComponent(ctx, "caciocavallo", false);
+-                unpackComponent(ctx, "caciocavallo17", false);
+-                // Since the Java module system doesn't allow multiple JARs to declare the same module,
+-                // we repack them to a single file here
+-                unpackLwjglNatives(ctx);
+-                unpackComponent(ctx, "lwjgl3/3.3.3", false);
+-                unpackComponent(ctx, "lwjgl3/3.4.1", false);
+-                unpackComponent(ctx, "security", true);
+-                unpackComponent(ctx, "arc_dns_injector", true);
+-                unpackComponent(ctx, "MioLibPatcher", true);
+-                unpackComponent(ctx, "forge_installer", true);
+-            } catch (IOException e) {
+-                Log.e("AsyncAssetManager", "Failed to unpack components !",e );
+-            }
++        sExecutorService.execute(() -> unpackComponentsNow(ctx));
++    }
++
++    /** Little Craft Launcher: the same work on the calling thread; see unpackSingleFilesNow. */
++    public static void unpackComponentsNow(Context ctx){
++        ProgressLayout.setProgress(ProgressLayout.EXTRACT_COMPONENTS, 0);
++        try {
++            unpackComponent(ctx, "caciocavallo", false);
++            unpackComponent(ctx, "caciocavallo17", false);
++            // Since the Java module system doesn't allow multiple JARs to declare the same module,
++            // we repack them to a single file here
++            unpackLwjglNatives(ctx);
++            unpackComponent(ctx, "lwjgl3/3.3.3", false);
++            unpackComponent(ctx, "lwjgl3/3.4.1", false);
++            unpackComponent(ctx, "security", true);
++            unpackComponent(ctx, "arc_dns_injector", true);
++            unpackComponent(ctx, "MioLibPatcher", true);
++            unpackComponent(ctx, "forge_installer", true);
++        } catch (IOException e) {
++            Log.e("AsyncAssetManager", "Failed to unpack components !",e );
++        } finally {
+             ProgressLayout.clearProgress(ProgressLayout.EXTRACT_COMPONENTS);
+-        });
++        }
+     }
+     // Piggybacks off of the java modules extracting later to use their version files for update checks
+     // This is indeed prone to breaking.
+diff --git a/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
+index 7712116..5963a60 100644
+--- a/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
++++ b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
+@@ -7,8 +7,13 @@ import static org.junit.Assert.assertTrue;
+ import org.junit.Test;
+ 
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.List;
+ import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+@@ -27,6 +32,115 @@ public class LclPreparationTest {
+         }
+     }
+ 
++    private static final LclPreparation.Settle NOTHING_ELSE = () -> { };
++
++    /**
++     * The work has returned, but a task it queued on an executor (as component
++     * unpacking does) is still writing -> leave the screen -> retry at once.
++     * Run for both ways the outer work can end early.
++     */
++    private void asynchronousChildHoldsThePreparation(final boolean outerFails) throws Exception {
++        final ExecutorService executor = Executors.newFixedThreadPool(4);
++        try {
++            final CountDownLatch childStarted = new CountDownLatch(1);
++            final CountDownLatch releaseChild = new CountDownLatch(1);
++            final AtomicInteger writing = new AtomicInteger();
++            final AtomicInteger mostWritingAtOnce = new AtomicInteger();
++            final List<Future<?>> children = Collections.synchronizedList(new ArrayList<>());
++            // Waits for exactly the tasks this preparation queued.
++            final LclPreparation.Settle settle = () -> {
++                for (Future<?> child : new ArrayList<>(children)) {
++                    try {
++                        child.get();
++                    } catch (ExecutionException e) {
++                        throw new AssertionError(e);
++                    }
++                }
++            };
++            final LclPreparation.Work work = cancellation -> {
++                children.add(executor.submit(() -> {
++                    mostWritingAtOnce.accumulateAndGet(writing.incrementAndGet(), Math::max);
++                    try {
++                        childStarted.countDown();
++                        releaseChild.await(30, TimeUnit.SECONDS); // a slow shared-directory write
++                    } catch (InterruptedException e) {
++                        Thread.currentThread().interrupt();
++                    } finally {
++                        writing.decrementAndGet();
++                    }
++                }));
++                assertTrue(childStarted.await(30, TimeUnit.SECONDS));
++                if (outerFails) throw new IllegalStateException("No compatible Java runtime");
++                cancellation.request();   // the user left the screen
++                cancellation.check();     // ... and the outer work exits here
++            };
++            final Reports first = new Reports();
++            final AtomicReference<LclPreparation.Outcome> firstOutcome = new AtomicReference<>();
++            Thread preparing = new Thread(() -> firstOutcome.set(LclPreparation.run("survival-1", work,
++                    new LclPreparation.Cancellation(), settle, first)));
++            preparing.start();
++            assertTrue(childStarted.await(30, TimeUnit.SECONDS));
++            // Give the outer work time to leave its own call stack.
++            preparing.join(300);
++            assertTrue("the preparation is not over while its child still writes", preparing.isAlive());
++            assertTrue("no final state before the child stopped", first.snapshot().isEmpty());
++            assertEquals(1, writing.get());
++
++            // An immediate retry must not start a second writer.
++            final Reports retry = new Reports();
++            final AtomicInteger retryRan = new AtomicInteger();
++            assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("survival-1",
++                    cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), NOTHING_ELSE, retry));
++            assertEquals(0, retryRan.get());
++            assertTrue(retry.snapshot().isEmpty());
++            assertTrue(first.snapshot().isEmpty());
++
++            // The child finishes: only now does the final state go out.
++            releaseChild.countDown();
++            preparing.join(30000);
++            assertFalse(preparing.isAlive());
++            assertEquals(outerFails ? LclPreparation.Outcome.FAILED : LclPreparation.Outcome.CANCELLED, firstOutcome.get());
++            assertEquals(1, first.snapshot().size());
++            assertEquals(outerFails ? "failed:No compatible Java runtime" : "cancelled", first.snapshot().get(0));
++            assertEquals(0, writing.get());
++            assertEquals(1, mostWritingAtOnce.get());
++
++            // And a retry prepares normally again.
++            final Reports again = new Reports();
++            assertEquals(LclPreparation.Outcome.PREPARED, LclPreparation.run("survival-1",
++                    cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), NOTHING_ELSE, again));
++            assertEquals(1, retryRan.get());
++        } finally {
++            executor.shutdownNow();
++        }
++    }
++
++    @Test
++    public void cancellationWaitsForAsynchronousChildren() throws Exception {
++        asynchronousChildHoldsThePreparation(false);
++    }
++
++    @Test
++    public void failureWaitsForAsynchronousChildren() throws Exception {
++        asynchronousChildHoldsThePreparation(true);
++    }
++
++    @Test
++    public void successWaitsForAsynchronousChildrenToo() throws Exception {
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicReference<LclPreparation.Outcome> outcome = new AtomicReference<>();
++        Thread preparing = new Thread(() -> outcome.set(LclPreparation.run("a", cancellation -> { },
++                new LclPreparation.Cancellation(), () -> release.await(), new Reports())));
++        preparing.start();
++        preparing.join(300);
++        assertTrue(preparing.isAlive());
++        assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("a", cancellation -> { },
++                new LclPreparation.Cancellation(), NOTHING_ELSE, new Reports()));
++        release.countDown();
++        preparing.join(30000);
++        assertEquals(LclPreparation.Outcome.PREPARED, outcome.get());
++    }
++
+     /** Preparation blocked in a download -> leave the screen -> retry at once. */
+     @Test
+     public void cancellationIsReportedOnlyAfterTheWorkStopped() throws Exception {
+@@ -49,7 +163,7 @@ public class LclPreparationTest {
+         final LclPreparation.Cancellation firstCancellation = new LclPreparation.Cancellation();
+         final AtomicReference<LclPreparation.Outcome> firstOutcome = new AtomicReference<>();
+         Thread preparing = new Thread(() ->
+-                firstOutcome.set(LclPreparation.run("survival-1", blockedDownload, firstCancellation, first)));
++                firstOutcome.set(LclPreparation.run("survival-1", blockedDownload, firstCancellation, NOTHING_ELSE, first)));
+         preparing.start();
+         assertTrue(started.await(30, TimeUnit.SECONDS));
+ 
+@@ -62,13 +176,13 @@ public class LclPreparationTest {
+         final Reports retry = new Reports();
+         final AtomicInteger retryRan = new AtomicInteger();
+         assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("survival-1",
+-                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), retry));
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), NOTHING_ELSE, retry));
+         assertEquals(0, retryRan.get());
+         assertTrue(retry.snapshot().isEmpty());
+         // Another instance is refused too, and its own session is ended.
+         final Reports other = new Reports();
+         assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("creative-2",
+-                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), other));
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), NOTHING_ELSE, other));
+         assertEquals(0, retryRan.get());
+         assertEquals(1, other.snapshot().size());
+         assertTrue(other.snapshot().get(0).startsWith("failed:"));
+@@ -86,7 +200,7 @@ public class LclPreparationTest {
+         // After that a retry prepares normally and reports nothing itself.
+         final Reports again = new Reports();
+         assertEquals(LclPreparation.Outcome.PREPARED, LclPreparation.run("survival-1",
+-                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), again));
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), NOTHING_ELSE, again));
+         assertEquals(1, retryRan.get());
+         assertTrue(again.snapshot().isEmpty());
+     }
+@@ -96,14 +210,14 @@ public class LclPreparationTest {
+         final Reports reports = new Reports();
+         assertEquals(LclPreparation.Outcome.FAILED, LclPreparation.run("a", cancellation -> {
+             throw new IllegalStateException("No compatible Java runtime\nat somewhere");
+-        }, new LclPreparation.Cancellation(), reports));
++        }, new LclPreparation.Cancellation(), NOTHING_ELSE, reports));
+         assertEquals(1, reports.snapshot().size());
+         assertEquals("failed:No compatible Java runtime", reports.snapshot().get(0));
+ 
+         final Reports nameless = new Reports();
+         assertEquals(LclPreparation.Outcome.FAILED, LclPreparation.run("a", cancellation -> {
+             throw new NullPointerException();
+-        }, new LclPreparation.Cancellation(), nameless));
++        }, new LclPreparation.Cancellation(), NOTHING_ELSE, nameless));
+         assertEquals("failed:NullPointerException", nameless.snapshot().get(0));
+     }
+ 
+@@ -114,7 +228,7 @@ public class LclPreparationTest {
+         assertEquals(LclPreparation.Outcome.CANCELLED, LclPreparation.run("a", requested -> {
+             requested.request();
+             throw new java.io.IOException("stream closed");
+-        }, cancellation, reports));
++        }, cancellation, NOTHING_ELSE, reports));
+         assertEquals(1, reports.snapshot().size());
+         assertEquals("cancelled", reports.snapshot().get(0));
+     }
+@@ -129,7 +243,7 @@ public class LclPreparationTest {
+             requested.request();
+             requested.check();
+             steps.incrementAndGet();
+-        }, cancellation, reports));
++        }, cancellation, NOTHING_ELSE, reports));
+         assertEquals(1, steps.get());
+         assertEquals("cancelled", reports.snapshot().get(0));
+     }
+-- 
+2.43.0
+
