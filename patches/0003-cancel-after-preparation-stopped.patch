@@ -1,0 +1,426 @@
+From 6c468d6bc08f26c19321a7c4c3faeda71897cace Mon Sep 17 00:00:00 2001
+From: Tao Xiaobai <1599170798@qq.com>
+Date: Sat, 14 Nov 2026 15:16:48 +0000
+Subject: [PATCH 3/3] Little Craft Launcher: report a cancelled preparation
+ only after it stopped
+
+Leaving the preparation screen reported "cancelled" at once while the
+preparation task kept downloading and unpacking, so the host accepted a retry
+that worked on the same Java runtime archive, runtime directory and library
+part files.
+
+- LclPreparation: one preparation per process; leaving only requests
+  cancellation, the work checks it between steps and inside its own library
+  download, and "cancelled" is reported when the work has really stopped. A
+  start that arrives meanwhile is refused without running and without ending
+  the session the old work still owns.
+- Regression: preparation blocked in a download, leave, retry at once.
+---
+ .../pojavlaunch/lcl/LclGameEntryActivity.java |  63 +++++---
+ .../kdt/pojavlaunch/lcl/LclPreparation.java   | 109 ++++++++++++++
+ .../pojavlaunch/lcl/LclPreparationTest.java   | 136 ++++++++++++++++++
+ 3 files changed, 288 insertions(+), 20 deletions(-)
+ create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
+ create mode 100644 app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
+
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+index e7d93e0..2d031db 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+@@ -77,6 +77,7 @@ public class LclGameEntryActivity extends AppCompatActivity {
+ 
+     // Whether this activity already told the host how the hand-over ended.
+     private volatile boolean mReported;
++    private final LclPreparation.Cancellation mCancellation = new LclPreparation.Cancellation();
+     private String mSessionId;
+     private TextView mStatus;
+     private ProgressBar mProgress;
+@@ -89,30 +90,36 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         final Intent request = getIntent();
+         mSessionId = request.getStringExtra(LclSession.EXTRA_SESSION_ID);
+         PojavApplication.sExecutorService.execute(() -> {
+-            try {
+-                prepare(request);
+-            } catch (Throwable throwable) {
+-                Log.e(TAG, "Could not prepare the game", throwable);
+-                String reason = throwable.getMessage();
+-                report("failed", reason == null || reason.isEmpty() ? throwable.getClass().getSimpleName() : firstLine(reason));
+-                showFailure(throwable);
++            final Throwable[] failure = new Throwable[1];
++            LclPreparation.Outcome outcome = LclPreparation.run(mSessionId, cancellation -> {
++                try {
++                    prepare(request, cancellation);
++                } catch (Throwable throwable) {
++                    failure[0] = throwable;
++                    throw throwable;
++                }
++            }, mCancellation, this::report);
++            if (outcome == LclPreparation.Outcome.PREPARED) {
++                launchWhenReady(request);
++            } else if (outcome == LclPreparation.Outcome.FAILED) {
++                Log.e(TAG, "Could not prepare the game", failure[0]);
++                showFailure(failure[0]);
++            } else if (outcome == LclPreparation.Outcome.BUSY) {
++                showFailure(new IllegalStateException("The previous preparation has not finished yet. Try again in a moment."));
+             }
+         });
+     }
+ 
+     @Override
+     protected void onDestroy() {
+-        // Left before the game process was launched: release the instance.
+-        if (isFinishing()) report("cancelled", null);
++        // Leaving only asks the preparation to stop. The host is told
++        // "cancelled" by the preparation itself once it has really stopped
++        // (LclPreparation), so nothing else can touch the shared Java runtime
++        // and library files while it is still working.
++        if (isFinishing()) mCancellation.request();
+         super.onDestroy();
+     }
+ 
+-    private static String firstLine(String text) {
+-        int end = text.indexOf('\n');
+-        String line = end < 0 ? text : text.substring(0, end);
+-        return line.length() > 300 ? line.substring(0, 300) : line;
+-    }
+-
+     /** Tells the host, once, how this hand-over ended. */
+     private synchronized void report(String state, String message) {
+         if (mReported) return;
+@@ -204,7 +211,8 @@ public class LclGameEntryActivity extends AppCompatActivity {
+      * here. Only unconditional libraries with an explicit, hash-pinned artifact
+      * are fetched; platform-specific ones the host skipped stay skipped.
+      */
+-    private void ensureSubstitutedLibraries(JMinecraftVersionList.Version versionInfo) throws Exception {
++    private void ensureSubstitutedLibraries(JMinecraftVersionList.Version versionInfo,
++                                            LclPreparation.Cancellation cancellation) throws Exception {
+         if (versionInfo.libraries == null) return;
+         for (DependentLibrary library : versionInfo.libraries) {
+             if (library == null || library.name == null || library.rules != null) continue;
+@@ -215,6 +223,7 @@ public class LclGameEntryActivity extends AppCompatActivity {
+             if (!artifact.path.matches("[A-Za-z0-9._/+-]+\\.jar") || artifact.path.contains("..")) continue;
+             File target = new File(Tools.DIR_HOME_LIBRARY, artifact.path);
+             if (target.isFile()) continue;
++            cancellation.check();
+             setStatus("Downloading " + library.name + "…");
+             File parent = target.getParentFile();
+             if (parent == null || (!parent.isDirectory() && !parent.mkdirs()))
+@@ -230,6 +239,10 @@ public class LclGameEntryActivity extends AppCompatActivity {
+                 long total = 0;
+                 int read;
+                 while ((read = input.read(buffer)) != -1) {
++                    if (cancellation.requested()) {
++                        partial.delete();
++                        cancellation.check();
++                    }
+                     total += read;
+                     if (total > 64L * 1024 * 1024) throw new IllegalStateException("Library is unexpectedly large: " + library.name);
+                     digest.update(buffer, 0, read);
+@@ -251,7 +264,7 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         }
+     }
+ 
+-    private void prepare(Intent request) throws Throwable {
++    private void prepare(Intent request, LclPreparation.Cancellation cancellation) throws Throwable {
+         final String versionId = required(request, EXTRA_VERSION_ID);
+         final String gameDir = checkedRelative(required(request, EXTRA_GAME_DIR));
+         final String username = required(request, EXTRA_USERNAME);
+@@ -269,6 +282,7 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         if (!versionJson.isFile())
+             throw new IllegalStateException("The version " + versionId + " is not installed");
+ 
++        cancellation.check();
+         setStatus("Unpacking runtime components…");
+         AsyncAssetManager.unpackComponents(this);
+         AsyncAssetManager.unpackSingleFiles(this);
+@@ -311,18 +325,27 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         LauncherPreferences.DEFAULT_PREF.edit()
+                 .putString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE, key).commit();
+ 
++        cancellation.check();
+         setStatus("Checking the Java runtime…\nThe first start of a game version may download one.");
+         JMinecraftVersionList.Version versionInfo = Tools.getVersionInfo(versionId);
+         if (!NewJREUtil.installNewJreIfNeeded(this, versionInfo))
+             throw new IllegalStateException("No compatible Java runtime is available for " + versionId);
+ 
++        cancellation.check();
+         setStatus("Checking libraries…");
+-        ensureSubstitutedLibraries(versionInfo);
++        cancellation.check();
++        ensureSubstitutedLibraries(versionInfo, cancellation);
++        cancellation.check();
++    }
+ 
++    /** The preparation finished: start the game once the runtime is idle. */
++    private void launchWhenReady(Intent request) {
++        final String versionId = request.getStringExtra(EXTRA_VERSION_ID);
+         setStatus("Starting Minecraft " + versionId + "…");
+         ProgressKeeper.waitUntilDone(() -> runOnUiThread(() -> {
+-            if (isFinishing() || isDestroyed()) {
+-                report("cancelled", null); // the screen went away before the game could start
++            if (mCancellation.requested() || isFinishing() || isDestroyed()) {
++                // Nothing is running any more; the instance can be released.
++                report("cancelled", null);
+                 return;
+             }
+             Intent game = new Intent(this, MainActivity.class);
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
+new file mode 100644
+index 0000000..62174d4
+--- /dev/null
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclPreparation.java
+@@ -0,0 +1,109 @@
++package net.kdt.pojavlaunch.lcl;
++
++import java.util.concurrent.CancellationException;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.locks.ReentrantLock;
++
++/**
++ * Runs the preparation of a game (unpacking components, downloading a Java
++ * runtime and substituted libraries) so that the host is told the truth:
++ *
++ * - Preparations share files (the Java runtime archive and directory, library
++ *   downloads), so only one runs in the process at a time.
++ * - Leaving the preparation screen only asks the work to stop. "cancelled" is
++ *   reported when the work has actually stopped, never before: until then the
++ *   host keeps the instance protected and accepts no new start that could
++ *   touch the same files.
++ */
++public final class LclPreparation {
++    /** How the preparation ended, as reported to the host exactly once. */
++    public interface Reporter {
++        void report(String state, String message);
++    }
++
++    /** The work; it calls {@link Cancellation#check()} between its steps. */
++    public interface Work {
++        void run(Cancellation cancellation) throws Throwable;
++    }
++
++    public static final class Cancellation {
++        private final AtomicBoolean mRequested = new AtomicBoolean();
++
++        public void request() {
++            mRequested.set(true);
++        }
++
++        public boolean requested() {
++            return mRequested.get();
++        }
++
++        /** @throws CancellationException once cancellation was requested */
++        public void check() {
++            if (mRequested.get()) throw new CancellationException("The preparation was cancelled");
++        }
++    }
++
++    public enum Outcome { PREPARED, CANCELLED, FAILED, BUSY }
++
++    private static final ReentrantLock sExclusive = new ReentrantLock();
++    private static volatile String sActiveSession;
++
++    private LclPreparation() {}
++
++    /**
++     * Runs the work on the calling thread.
++     *
++     * PREPARED  the work finished; nothing is reported here, the caller goes on
++     *           to start the game (and reports "starting" or "cancelled").
++     * CANCELLED the work stopped after a cancellation request; "cancelled" was
++     *           reported after it stopped.
++     * FAILED    the work threw; "failed" with the reason was reported, unless
++     *           cancellation had been requested, which reports "cancelled".
++     * BUSY      another preparation is still running; the work was not started.
++     *           Nothing is reported for the session that is still preparing
++     *           (its own task will end it); any other session gets "failed".
++     */
++    public static Outcome run(String sessionId, Work work, Cancellation cancellation, Reporter reporter) {
++        if (!sExclusive.tryLock()) {
++            String active = sActiveSession;
++            if (sessionId == null || !sessionId.equals(active))
++                reporter.report("failed", "Another game is still being prepared");
++            return Outcome.BUSY;
++        }
++        Outcome outcome;
++        String state = null;
++        String message = null;
++        try {
++            sActiveSession = sessionId;
++            work.run(cancellation);
++            if (cancellation.requested()) {
++                outcome = Outcome.CANCELLED;
++                state = "cancelled";
++            } else {
++                outcome = Outcome.PREPARED;
++            }
++        } catch (Throwable throwable) {
++            if (cancellation.requested() || throwable instanceof CancellationException) {
++                outcome = Outcome.CANCELLED;
++                state = "cancelled";
++            } else {
++                outcome = Outcome.FAILED;
++                state = "failed";
++                String reason = throwable.getMessage();
++                message = reason == null || reason.isEmpty() ? throwable.getClass().getSimpleName() : firstLine(reason);
++            }
++        } finally {
++            sActiveSession = null;
++            sExclusive.unlock();
++        }
++        // Reported only now: the work has stopped and released the shared files.
++        if (state != null) reporter.report(state, message);
++        return outcome;
++    }
++
++    static String firstLine(String text) {
++        int end = text.indexOf('\n');
++        String line = end < 0 ? text : text.substring(0, end);
++        return line.length() > 300 ? line.substring(0, 300) : line;
++    }
++}
+diff --git a/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
+new file mode 100644
+index 0000000..7712116
+--- /dev/null
++++ b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclPreparationTest.java
+@@ -0,0 +1,136 @@
++package net.kdt.pojavlaunch.lcl;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++
++public class LclPreparationTest {
++    private static final class Reports implements LclPreparation.Reporter {
++        final List<String> entries = new ArrayList<>();
++
++        @Override
++        public synchronized void report(String state, String message) {
++            entries.add(message == null ? state : state + ":" + message);
++        }
++
++        synchronized List<String> snapshot() {
++            return new ArrayList<>(entries);
++        }
++    }
++
++    /** Preparation blocked in a download -> leave the screen -> retry at once. */
++    @Test
++    public void cancellationIsReportedOnlyAfterTheWorkStopped() throws Exception {
++        final CountDownLatch started = new CountDownLatch(1);
++        final CountDownLatch release = new CountDownLatch(1);
++        final AtomicInteger running = new AtomicInteger();
++        final AtomicInteger mostAtOnce = new AtomicInteger();
++        final LclPreparation.Work blockedDownload = cancellation -> {
++            mostAtOnce.accumulateAndGet(running.incrementAndGet(), Math::max);
++            try {
++                started.countDown();
++                // A download that cannot be interrupted mid-transfer.
++                assertTrue(release.await(30, TimeUnit.SECONDS));
++                cancellation.check();
++            } finally {
++                running.decrementAndGet();
++            }
++        };
++        final Reports first = new Reports();
++        final LclPreparation.Cancellation firstCancellation = new LclPreparation.Cancellation();
++        final AtomicReference<LclPreparation.Outcome> firstOutcome = new AtomicReference<>();
++        Thread preparing = new Thread(() ->
++                firstOutcome.set(LclPreparation.run("survival-1", blockedDownload, firstCancellation, first)));
++        preparing.start();
++        assertTrue(started.await(30, TimeUnit.SECONDS));
++
++        // The user leaves the preparation screen while the download still runs.
++        firstCancellation.request();
++        assertTrue("nothing may be reported while the work is still running", first.snapshot().isEmpty());
++
++        // An immediate retry of the same instance must not run next to it, and
++        // must not end the session the old work still owns.
++        final Reports retry = new Reports();
++        final AtomicInteger retryRan = new AtomicInteger();
++        assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("survival-1",
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), retry));
++        assertEquals(0, retryRan.get());
++        assertTrue(retry.snapshot().isEmpty());
++        // Another instance is refused too, and its own session is ended.
++        final Reports other = new Reports();
++        assertEquals(LclPreparation.Outcome.BUSY, LclPreparation.run("creative-2",
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), other));
++        assertEquals(0, retryRan.get());
++        assertEquals(1, other.snapshot().size());
++        assertTrue(other.snapshot().get(0).startsWith("failed:"));
++        assertTrue(first.snapshot().isEmpty());
++
++        // The old work finally stops: only now is the cancellation reported.
++        release.countDown();
++        preparing.join(30000);
++        assertFalse(preparing.isAlive());
++        assertEquals(LclPreparation.Outcome.CANCELLED, firstOutcome.get());
++        assertEquals(1, first.snapshot().size());
++        assertEquals("cancelled", first.snapshot().get(0));
++        assertEquals(1, mostAtOnce.get());
++
++        // After that a retry prepares normally and reports nothing itself.
++        final Reports again = new Reports();
++        assertEquals(LclPreparation.Outcome.PREPARED, LclPreparation.run("survival-1",
++                cancellation -> retryRan.incrementAndGet(), new LclPreparation.Cancellation(), again));
++        assertEquals(1, retryRan.get());
++        assertTrue(again.snapshot().isEmpty());
++    }
++
++    @Test
++    public void failuresReportTheirFirstLine() {
++        final Reports reports = new Reports();
++        assertEquals(LclPreparation.Outcome.FAILED, LclPreparation.run("a", cancellation -> {
++            throw new IllegalStateException("No compatible Java runtime\nat somewhere");
++        }, new LclPreparation.Cancellation(), reports));
++        assertEquals(1, reports.snapshot().size());
++        assertEquals("failed:No compatible Java runtime", reports.snapshot().get(0));
++
++        final Reports nameless = new Reports();
++        assertEquals(LclPreparation.Outcome.FAILED, LclPreparation.run("a", cancellation -> {
++            throw new NullPointerException();
++        }, new LclPreparation.Cancellation(), nameless));
++        assertEquals("failed:NullPointerException", nameless.snapshot().get(0));
++    }
++
++    @Test
++    public void aFailureAfterCancellationIsACancellation() {
++        final Reports reports = new Reports();
++        final LclPreparation.Cancellation cancellation = new LclPreparation.Cancellation();
++        assertEquals(LclPreparation.Outcome.CANCELLED, LclPreparation.run("a", requested -> {
++            requested.request();
++            throw new java.io.IOException("stream closed");
++        }, cancellation, reports));
++        assertEquals(1, reports.snapshot().size());
++        assertEquals("cancelled", reports.snapshot().get(0));
++    }
++
++    @Test
++    public void cancellationBetweenStepsStopsTheWork() {
++        final Reports reports = new Reports();
++        final AtomicInteger steps = new AtomicInteger();
++        final LclPreparation.Cancellation cancellation = new LclPreparation.Cancellation();
++        assertEquals(LclPreparation.Outcome.CANCELLED, LclPreparation.run("a", requested -> {
++            steps.incrementAndGet();
++            requested.request();
++            requested.check();
++            steps.incrementAndGet();
++        }, cancellation, reports));
++        assertEquals(1, steps.get());
++        assertEquals("cancelled", reports.snapshot().get(0));
++    }
++}
+-- 
+2.43.0
+
