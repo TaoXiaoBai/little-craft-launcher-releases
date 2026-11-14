@@ -1,4 +1,4 @@
-From af310eab7a66353c92f07fac7b06a1fe93971985 Mon Sep 17 00:00:00 2001
+From 41d2b099e9bb713077eed31ccbd49876733037a2 Mon Sep 17 00:00:00 2001
 From: Tao Xiaobai <1599170798@qq.com>
 Date: Sat, 14 Nov 2026 16:15:02 +0000
 Subject: [PATCH 5/5] Little Craft Launcher: end a preparation by its real
@@ -21,23 +21,23 @@ was reported and every later preparation was refused until the app was killed.
   user had left) is reported, no record remains, a retry prepares normally;
   plus the existing blocked-child cases, now on real Futures.
 ---
- app_pojavlauncher/build.gradle                |   7 +
+ app_pojavlauncher/build.gradle                |  13 ++
  .../pojavlaunch/lcl/LclGameEntryActivity.java |  30 ++-
  .../kdt/pojavlaunch/lcl/LclPreparation.java   |  78 +++++---
  .../net/kdt/pojavlaunch/lcl/LclProgress.java  |  30 +++
  .../src/test/java/android/os/Environment.java |  25 +++
  .../lcl/LclJavaDownloadFailureTest.java       | 180 ++++++++++++++++++
  .../pojavlaunch/lcl/LclPreparationTest.java   | 106 ++++++-----
- 7 files changed, 367 insertions(+), 89 deletions(-)
+ 7 files changed, 373 insertions(+), 89 deletions(-)
  create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclProgress.java
  create mode 100644 app_pojavlauncher/src/test/java/android/os/Environment.java
  create mode 100644 app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclJavaDownloadFailureTest.java
 
 diff --git a/app_pojavlauncher/build.gradle b/app_pojavlauncher/build.gradle
-index 9d22b42..ada8210 100644
+index 9d22b42..a4f11af 100644
 --- a/app_pojavlauncher/build.gradle
 +++ b/app_pojavlauncher/build.gradle
-@@ -206,6 +206,13 @@ android {
+@@ -206,6 +206,19 @@ android {
          abortOnError false
      }
  
@@ -46,6 +46,12 @@ index 9d22b42..ada8210 100644
 +        // (the downloader, the progress keeper); Android calls they make on
 +        // the way, such as logging, return defaults instead of throwing.
 +        unitTests.returnDefaultValues = true
++        // Name every test in the build log, so a run shows what was executed.
++        unitTests.all {
++            testLogging {
++                events 'passed', 'skipped', 'failed'
++            }
++        }
 +    }
 +
      androidResources {
