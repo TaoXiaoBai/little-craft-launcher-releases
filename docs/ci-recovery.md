@@ -50,6 +50,8 @@ python3 "$public_checkout/.github/scripts/ci_triage.py" \
 
 摘要包含 run/attempt、源码提交、受控错误类别、已公开的失败测试组、源码文件指纹及行列号。它不包含原始路径、源码、断言内容、测试数据行、用户名、令牌或原始日志。工具在私有 checkout 的对应 Git tree 中匹配文件指纹，通过 `git show` 只在本地显示实际文件与代码位置。
 
+`summary.status` 是生成摘要时的快照；之后加密或上传产物仍可能失败。远程命令会另外返回 `outcomes`，显示所选 attempt 的 run、对应 job 的最新 API 状态与结论，以及失败的公开步骤名。判断 CI 结果先看这些状态，`in_progress` 不能算通过，也不能拿摘要里的 `passed` 覆盖后续失败。明确指定历史 `--attempt N` 时，显示该次 attempt 的结果；离线 `--summary-file` 没有核验最终状态，`outcomes` 为 `null`。`--safe-only` 同样会显示公开状态信息，但不输出私有文件路径或源码。
+
 若源码提交尚未在本地，按工具提示从已经授权的私有 remote 获取该提交，然后建立隔离 worktree。不要把失败 run 的行号直接套到另一个提交：
 
 ```sh

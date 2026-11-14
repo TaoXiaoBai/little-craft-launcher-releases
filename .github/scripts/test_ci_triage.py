@@ -47,9 +47,11 @@ class FakeGitHub:
         self.blob = archive(self.summary)
         self.repo = dict(id=10, full_name=REPO, default_branch='main', private=False)
         self.run = dict(id=RUN, run_attempt=2, event='workflow_dispatch', path='.github/workflows/prerelease.yml',
-            head_branch='main', head_sha=SHA, status='completed', repository=dict(id=10, full_name=REPO),
+            head_branch='main', head_sha=SHA, status='completed', conclusion='failure',
+            repository=dict(id=10, full_name=REPO),
             head_repository=dict(id=10, full_name=REPO))
         self.jobs = [dict(name='Test windows-x64 companion UI', run_id=RUN, run_attempt=2, head_sha=SHA,
+            status='completed', conclusion='failure', steps=[{'name':'Build companion','conclusion':'failure'}],
             started_at='2026-01-01T00:00:00Z', completed_at='2026-01-01T00:10:00Z')]
         self.artifacts = [dict(id=20, name='safe-diagnostics-windows-ui-companion-attempt-2', expired=False,
             size_in_bytes=len(self.blob), digest='sha256:' + hashlib.sha256(self.blob).hexdigest(),
@@ -58,6 +60,9 @@ class FakeGitHub:
         self.calls = []
         self.final_run = None
         self.run_reads = 0
+        self.jobs_reads = 0
+        self.final_jobs = None
+        self.historical_runs = {}
 
     def json(self, route, *, pages=False):
         self.calls.append((route, pages))
@@ -67,10 +72,14 @@ class FakeGitHub:
             self.run_reads += 1
             return copy.deepcopy(self.final_run if self.final_run is not None and self.run_reads > 1 else self.run)
         if '/attempts/' in route and route.endswith('/jobs?per_page=100'):
-            return [dict(jobs=copy.deepcopy(self.jobs))]
+            self.jobs_reads += 1
+            return [dict(jobs=copy.deepcopy(self.final_jobs if self.final_jobs is not None
+                and self.jobs_reads > 1 else self.jobs))]
         if route.endswith('/artifacts?per_page=100'):
             return [dict(artifacts=copy.deepcopy(self.artifacts))]
         if route.endswith('/attempts/1'):
+            if 1 in self.historical_runs:
+                return copy.deepcopy(self.historical_runs[1])
             value = copy.deepcopy(self.run)
             value['run_attempt'] = 1
             return value
@@ -123,6 +132,90 @@ class TriageTests(unittest.TestCase):
         github = FakeGitHub()
         self.assertEqual(triage.fetch_summaries(REPO, RUN, github=github), [summary()])
         self.assertTrue(any(call[0] == 'artifact' for call in github.calls))
+
+    def test_passed_snapshot_does_not_mask_later_public_upload_failure(self):
+        value = summary()
+        value.update(status='passed', categories=[], failedGroups=[], locations=[])
+        github = FakeGitHub(value)
+        github.jobs[0]['steps'] = [
+            {'name':'Build and test companion privately','conclusion':'success'},
+            {'name':'Retain matching package','conclusion':'failure'}]
+        outcomes = {}
+        result = triage.fetch_summaries(REPO, RUN, github=github, outcomes=outcomes)
+        self.assertEqual(result[0]['status'], 'passed')
+        self.assertEqual(value['status'], 'passed')
+        self.assertEqual(outcomes['run']['conclusion'], 'failure')
+        self.assertEqual(outcomes['jobs'][0]['conclusion'], 'failure')
+        self.assertEqual(outcomes['jobs'][0]['failedSteps'],
+            [{'name':'Retain matching package','conclusion':'failure'}])
+        self.assertIn('EARLY_DIAGNOSTIC_SNAPSHOT', outcomes['notice'])
+
+    def test_outcomes_refresh_current_run_and_job_after_download(self):
+        github = FakeGitHub()
+        github.run.update(status='in_progress', conclusion=None)
+        github.jobs[0].update(status='in_progress', conclusion=None)
+        github.final_run = copy.deepcopy(github.run)
+        github.final_run.update(status='completed', conclusion='failure')
+        github.final_jobs = copy.deepcopy(github.jobs)
+        github.final_jobs[0].update(status='completed', conclusion='failure',
+            steps=[{'name':'Encrypt private diagnostics','conclusion':'failure'}])
+        outcomes = {}
+        triage.fetch_summaries(REPO, RUN, github=github, outcomes=outcomes)
+        self.assertEqual(outcomes['run'],
+            {'runId':RUN,'runAttempt':2,'status':'completed','conclusion':'failure'})
+        self.assertEqual(outcomes['jobs'][0]['status'], 'completed')
+        self.assertEqual(outcomes['jobs'][0]['failedSteps'][0]['name'], 'Encrypt private diagnostics')
+        self.assertEqual(github.jobs_reads, 2)
+
+    def test_outcomes_for_explicit_history_do_not_use_latest_attempt_failure(self):
+        github = FakeGitHub()
+        github.summary['runAttempt'] = 1
+        github.blob = archive(github.summary)
+        github.jobs[0].update(run_attempt=1, conclusion='success', steps=[{'name':'Build','conclusion':'success'}])
+        github.artifacts[0].update(name='safe-diagnostics-windows-ui-companion-attempt-1',
+            size_in_bytes=len(github.blob), digest='sha256:' + hashlib.sha256(github.blob).hexdigest())
+        github.historical_runs[1] = copy.deepcopy(github.run)
+        github.historical_runs[1].update(run_attempt=1, conclusion='success')
+        outcomes = {}
+        triage.fetch_summaries(REPO, RUN, attempt=1, github=github, outcomes=outcomes)
+        self.assertEqual(outcomes['run']['runAttempt'], 1)
+        self.assertEqual(outcomes['run']['conclusion'], 'success')
+        self.assertEqual(outcomes['jobs'][0]['conclusion'], 'success')
+        self.assertEqual(outcomes['jobs'][0]['failedSteps'], [])
+
+    def test_refreshed_outcomes_reject_wrong_attempt_jobs(self):
+        github = FakeGitHub()
+        github.final_jobs = copy.deepcopy(github.jobs)
+        github.final_jobs[0]['run_attempt'] = 3
+        outcomes = {'oldSuccessfulRead': True}
+        with self.assertRaisesRegex(triage.TriageError, 'SUMMARY_JOB_MISMATCH'):
+            triage.fetch_summaries(REPO, RUN, github=github, outcomes=outcomes)
+        self.assertEqual(outcomes, {})
+
+    def test_safe_only_cli_includes_public_outcomes_without_source_paths(self):
+        github = FakeGitHub()
+        github.jobs[0]['steps'] = [{'name':'Upload encrypted diagnostics','conclusion':'failure'}]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = triage.main(['--repository',REPO,'--run-id',str(RUN),'--safe-only'], github=github,
+                environment={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPO})
+        self.assertEqual(code, 0)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value['outcomes']['run']['conclusion'], 'failure')
+        self.assertEqual(value['outcomes']['jobs'][0]['failedSteps'][0]['name'], 'Upload encrypted diagnostics')
+        self.assertNotIn('qt-native/tests/native_ui_tests.cpp', output.getvalue())
+        self.assertNotIn('PRIVATE_SOURCE_MARKER', output.getvalue())
+
+    def test_pending_outcomes_are_explicitly_incomplete(self):
+        github = FakeGitHub()
+        github.run.update(status='in_progress', conclusion=None)
+        github.jobs[0].update(status='in_progress', conclusion=None, steps=[])
+        outcomes = {}
+        triage.fetch_summaries(REPO, RUN, github=github, outcomes=outcomes)
+        self.assertEqual(outcomes['run']['status'], 'in_progress')
+        self.assertIsNone(outcomes['run']['conclusion'])
+        self.assertEqual(outcomes['jobs'][0]['status'], 'in_progress')
+        self.assertIsNone(outcomes['jobs'][0]['conclusion'])
 
     def test_remote_rejects_fork_or_alternate_workflow(self):
         for change in ('fork', 'branch', 'workflow', 'event'):
@@ -276,6 +369,7 @@ class SourceResolutionTests(unittest.TestCase):
         self.assertEqual(result, 0)
         value = json.loads(output.getvalue())
         self.assertFalse(value['provenanceVerified'])
+        self.assertIsNone(value['outcomes'])
         self.assertEqual(value['notice'], 'OFFLINE_SUMMARY_NOT_REMOTE_AUTHENTICATED')
         self.assertIn('PRIVATE_SOURCE_MARKER', output.getvalue())
 
