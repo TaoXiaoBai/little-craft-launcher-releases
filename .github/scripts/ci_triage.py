@@ -222,8 +222,58 @@ def validate_run(run, repository, repo, run_id, attempt):
             and hex_id(run.get('head_sha'), 40), 'RUN_PROVENANCE_MISMATCH')
 
 
-def fetch_summaries(repository, run_id, *, platform=None, attempt=None, github=None):
+def public_outcome(value):
+    status = value.get('status')
+    conclusion = value.get('conclusion')
+    require(status in ('queued', 'pending', 'requested', 'waiting', 'in_progress', 'completed')
+            and conclusion in (None, 'success', 'failure', 'neutral', 'cancelled', 'skipped',
+                               'timed_out', 'action_required', 'stale', 'startup_failure'),
+            'INVALID_FINAL_OUTCOME')
+    return {'status': status, 'conclusion': conclusion}
+
+
+def selected_job_outcomes(jobs, selected, run_id, run, attempt):
+    values = []
+    for platform in selected:
+        _, name = WORKFLOWS[platform]
+        matches = [job for job in jobs if isinstance(job, dict) and job.get('name') == name]
+        require(len(matches) == 1, 'SUMMARY_JOB_MISSING')
+        job = matches[0]
+        require(job.get('run_id') == run_id and job.get('head_sha') == run['head_sha']
+                and job.get('run_attempt', attempt) == attempt, 'SUMMARY_JOB_MISMATCH')
+        outcome = public_outcome(job)
+        steps_available = isinstance(job.get('steps'), list)
+        steps = job.get('steps', [])
+        require(isinstance(steps, list) and len(steps) <= 256, 'INVALID_PUBLIC_STEPS')
+        failed = []
+        for step in steps:
+            require(isinstance(step, dict), 'INVALID_PUBLIC_STEPS')
+            conclusion = step.get('conclusion')
+            if conclusion in (None, 'success', 'neutral', 'skipped'):
+                continue
+            require(conclusion in ('failure', 'cancelled', 'timed_out', 'action_required',
+                                   'stale', 'startup_failure'), 'INVALID_PUBLIC_STEPS')
+            step_name = step.get('name')
+            require(isinstance(step_name, str) and 0 < len(step_name) <= 512
+                    and all(ord(char) >= 32 and ord(char) != 127 for char in step_name),
+                    'INVALID_PUBLIC_STEPS')
+            failed.append({'name': step_name, 'conclusion': conclusion})
+        values.append({'platform': platform, 'name': name, **outcome,
+                       'stepsAvailable': steps_available, 'failedSteps': failed})
+    return values
+
+
+def fetch_summaries(repository, run_id, *, platform=None, attempt=None, github=None, outcomes=None):
+    """Return authenticated snapshots; optionally collect separate API outcomes.
+
+    A summary is emitted before encryption and artifact upload finish. Its
+    authenticated metadata can be valid while a later public step makes the job
+    fail, so never mutate or promote its snapshot status to the final result.
+    """
     repository_name(repository); positive(run_id)
+    require(outcomes is None or isinstance(outcomes, dict), 'INVALID_OUTCOME_CONTAINER')
+    if outcomes is not None:
+        outcomes.clear()  # A failed new read must not leave an older success in the output container.
     if platform is not None:
         require(platform in safe.PLATFORMS, 'INVALID_PLATFORM')
     github = github or GitHub()
@@ -243,6 +293,7 @@ def fetch_summaries(repository, run_id, *, platform=None, attempt=None, github=N
         f'repos/{repository}/actions/runs/{run_id}/attempts/{requested}/jobs', 'jobs')
     targets = [platform] if platform is not None else sorted(safe.PLATFORMS)
     summaries = []
+    selected = []
     for candidate in targets:
         name = f'safe-diagnostics-{candidate}-attempt-{requested}'
         matches = [entry for entry in artifacts if isinstance(entry, dict) and entry.get('name') == name]
@@ -277,10 +328,28 @@ def fetch_summaries(repository, run_id, *, platform=None, attempt=None, github=N
                 and summary['workflowCommit'] == run['head_sha'] and summary['platform'] == candidate,
                 'SUMMARY_METADATA_MISMATCH')
         summaries.append(summary)
+        selected.append(candidate)
     require(summaries, 'SAFE_SUMMARY_MISSING_USE_RUNBOOK')
     latest = github.json(f'repos/{repository}/actions/runs/{run_id}')
     require(isinstance(latest, dict) and latest.get('head_sha') == run['head_sha']
             and (attempt is not None or latest.get('run_attempt') == requested), 'RUN_CHANGED_DURING_READ')
+    if outcomes is not None:
+        # Re-read jobs after the download: an upload/encryption step can have
+        # failed since the summary itself or the earlier job inventory existed.
+        final_jobs = paginated(github,
+            f'repos/{repository}/actions/runs/{run_id}/attempts/{requested}/jobs', 'jobs')
+        final_current = github.json(f'repos/{repository}/actions/runs/{run_id}')
+        require(isinstance(final_current, dict) and final_current.get('head_sha') == run['head_sha']
+                and (attempt is not None or final_current.get('run_attempt') == requested),
+                'RUN_CHANGED_DURING_READ')
+        final_run = final_current if final_current.get('run_attempt') == requested else github.json(
+            f'repos/{repository}/actions/runs/{run_id}/attempts/{requested}')
+        validate_run(final_run, metadata, repository, run_id, requested)
+        result = {'observedAt': dt.datetime.now(dt.timezone.utc).isoformat(),
+                  'run': {'runId': run_id, 'runAttempt': requested, **public_outcome(final_run)},
+                  'jobs': selected_job_outcomes(final_jobs, selected, run_id, final_run, requested),
+                  'notice': 'SAFE_SUMMARY_STATUS_IS_AN_EARLY_DIAGNOSTIC_SNAPSHOT'}
+        outcomes.update(result)
     return summaries
 
 
@@ -397,9 +466,11 @@ def main(argv=None, *, github=None, environment=os.environ):
                 require(summaries[0]['platform'] == args.platform, 'SUMMARY_PLATFORM_MISMATCH')
         else:
             require(args.repository is not None, 'REPOSITORY_REQUIRED')
+            outcomes = {}
             summaries = fetch_summaries(args.repository, args.run_id, platform=args.platform,
-                                       attempt=args.attempt, github=github)
+                                       attempt=args.attempt, github=github, outcomes=outcomes)
         report = {'provenanceVerified': args.summary_file is None, 'safeOnly': args.safe_only,
+                  'outcomes': None if args.summary_file is not None else outcomes,
                   'results': summaries if args.safe_only else
                       [resolve_summary(summary, args.source_root, context=args.context) for summary in summaries]}
         if args.summary_file is not None:
