@@ -192,11 +192,98 @@ class ReleaseProvenanceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def create_receipt(self, proof, runtime, tag, platform, env):
-        return R.create_receipt(proof, runtime, tag, platform, env, build_dir=self.build_dir)
+    def create_receipt(self, proof, runtime, tag, platform, env, purpose='release'):
+        return R.create_receipt(proof, runtime, tag, platform, env,
+                                build_dir=self.build_dir, purpose=purpose)
 
-    def verify(self):
-        return R.verify_release(REPOSITORY, TAG, 101, 201, self.assets, self.gh)
+    def verify(self, *, verify_only=False):
+        return R.verify_release(REPOSITORY, TAG, 101, 201, self.assets, self.gh,
+                                verify_only=verify_only)
+
+    def test_new_release_receipts_require_explicit_publishable_purpose(self):
+        for receipt in self.receipts.values():
+            self.assertEqual(receipt['schemaVersion'], 2)
+            self.assertEqual(receipt['purpose'], 'release')
+        self.verify()
+        self.verify(verify_only=True)
+
+    def test_test_receipts_can_be_fully_verified_but_never_published(self):
+        for platform, receipt in self.receipts.items():
+            self.gh.replace_receipt(platform, dict(receipt, purpose='test'))
+        with self.assertRaisesRegex(P.ProofError, 'RELEASE_PURPOSE_NOT_PUBLISHABLE'):
+            self.verify()
+        self.assertEqual(self.verify(verify_only=True)['status'], 'PASS_SAME_SOURCE_RELEASE')
+
+    def test_legacy_unmarked_receipts_are_verification_only(self):
+        for platform, receipt in self.receipts.items():
+            legacy = dict(receipt, schemaVersion=1)
+            legacy.pop('purpose')
+            R.validate_receipt(legacy)
+            self.gh.replace_receipt(platform, legacy)
+            with self.assertRaises(P.ProofError):
+                R.validate_receipt(dict(legacy, purpose='release'))
+        with self.assertRaisesRegex(P.ProofError, 'RELEASE_PURPOSE_NOT_PUBLISHABLE'):
+            self.verify()
+        self.assertEqual(self.verify(verify_only=True)['status'], 'PASS_SAME_SOURCE_RELEASE')
+
+    def test_a_release_receipt_cannot_authorize_the_other_platform_test_package(self):
+        self.gh.replace_receipt('linux-x86_64', dict(self.receipts['linux-x86_64'], purpose='test'))
+        with self.assertRaisesRegex(P.ProofError, 'RELEASE_PURPOSE_NOT_PUBLISHABLE'):
+            self.verify()
+        self.verify(verify_only=True)
+
+    def test_missing_or_invalid_purpose_cannot_create_or_validate_a_new_receipt(self):
+        platform = 'windows-x64'
+        proof = self.proofs[platform]
+        for purpose in (None, '', 'preview', True, 1, ['release']):
+            with self.subTest(purpose=purpose):
+                with self.assertRaisesRegex(P.ProofError, 'INVALID_RELEASE_PURPOSE'):
+                    self.create_receipt(proof, self.paths[platform], TAG, platform,
+                                        environment(proof), purpose=purpose)
+                with self.assertRaises(P.ProofError):
+                    R.validate_receipt(dict(self.receipts[platform], purpose=purpose))
+        missing = dict(self.receipts[platform]); missing.pop('purpose')
+        with self.assertRaises(P.ProofError):
+            R.validate_receipt(missing)
+        with self.assertRaisesRegex(P.ProofError, 'INVALID_RELEASE_PURPOSE'):
+            R.create_receipt(proof, self.paths[platform], TAG, platform,
+                             environment(proof), build_dir=self.build_dir)
+
+    def test_verify_only_keeps_source_configuration_runtime_and_attempt_checks(self):
+        for key, code in (('sourceIdentitySha256', 'RELEASE_SOURCE_MISMATCH'),
+                          ('distributionConfigSha256', 'RELEASE_CONFIGURATION_MISMATCH')):
+            with self.subTest(key=key):
+                github = copy.deepcopy(self.gh)
+                for platform, receipt in self.receipts.items():
+                    changed = dict(receipt, purpose='test')
+                    if platform == 'linux-x86_64': changed[key] = 'b' * 64
+                    github.replace_receipt(platform, changed)
+                with self.assertRaisesRegex(P.ProofError, code):
+                    R.verify_release(REPOSITORY, TAG, 101, 201, self.assets, github, verify_only=True)
+        runtime = self.paths['windows-x64']
+        original = runtime.read_bytes()
+        runtime.write_bytes(original + b'-modified')
+        try:
+            with self.assertRaisesRegex(P.ProofError, 'RELEASE_RUNTIME_DIGEST_MISMATCH'):
+                self.verify(verify_only=True)
+        finally:
+            runtime.write_bytes(original)
+        for mutation in ('attempt', 'companion'):
+            with self.subTest(mutation=mutation):
+                github = copy.deepcopy(self.gh)
+                if mutation == 'attempt': github.runs[101]['run_attempt'] += 1
+                else: github.jobs[101][1]['conclusion'] = 'failure'
+                with self.assertRaises(P.ProofError):
+                    R.verify_release(REPOSITORY, TAG, 101, 201, self.assets, github, verify_only=True)
+
+    def test_verify_only_cli_must_explicitly_reach_the_same_verifier(self):
+        arguments = ['verify-runs', '--repository', REPOSITORY, '--tag', TAG,
+                     '--windows-run-id', '101', '--linux-run-id', '201', '--assets', str(self.assets)]
+        for verify_only in (False, True):
+            with self.subTest(verify_only=verify_only), mock.patch.object(R, 'verify_release') as verify:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(R.main(arguments + (['--verify-only'] if verify_only else [])), 0)
+                self.assertIs(verify.call_args.kwargs['verify_only'], verify_only)
 
     def test_same_source_cross_platform_keeps_private_identity_out_of_public_receipt(self):
         windows, linux = (self.receipts[p] for p in self.paths)
@@ -236,7 +323,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         platform = 'linux-x86_64'
         proof = self.proofs[platform]
         with self.assertRaises(P.ProofError):
-            R.create_receipt(proof, self.paths[platform], TAG, platform, environment(proof))
+            R.create_receipt(proof, self.paths[platform], TAG, platform, environment(proof), purpose='release')
         baseline = self.receipts[platform]['distributionConfigSha256']
         generated = self.build_dir / 'generated'
         for newline in (b'\r\n', b'\r'):
@@ -459,7 +546,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         output = self.root / 'public/windows.json'
         arguments = ['create', '--proof', str(proof_path), '--runtime', str(self.paths['windows-x64']),
                      '--tag', TAG, '--platform', 'windows-x64', '--build-dir', str(self.build_dir),
-                     '--output', str(output)]
+                     '--purpose', 'release', '--output', str(output)]
         stdout = io.StringIO()
         with mock.patch.dict(os.environ, environment(proof)), contextlib.redirect_stdout(stdout):
             self.assertEqual(R.main(arguments), 0)
@@ -471,6 +558,24 @@ class ReleaseProvenanceTests(unittest.TestCase):
         with mock.patch.dict(os.environ, environment(proof)), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(R.main(arguments), 1)
         self.assertEqual(output.read_bytes(), published)
+
+    def test_create_cli_requires_a_purpose_and_records_test_mode(self):
+        proof = self.proofs['windows-x64']
+        proof_path = self.root / 'private-combined-proof.json'
+        proof_path.write_bytes(P.canonical(proof))
+        output = self.root / 'test-only/windows.json'
+        arguments = ['create', '--proof', str(proof_path), '--runtime', str(self.paths['windows-x64']),
+                     '--tag', TAG, '--platform', 'windows-x64', '--build-dir', str(self.build_dir),
+                     '--output', str(output)]
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as missing:
+            R.main(arguments)
+        self.assertEqual(missing.exception.code, 2)
+        self.assertFalse(output.exists())
+        with mock.patch.dict(os.environ, environment(proof)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(R.main(arguments + ['--purpose', 'test']), 0)
+        receipt = json.loads(output.read_bytes())
+        self.assertEqual(receipt['schemaVersion'], 2)
+        self.assertEqual(receipt['purpose'], 'test')
 
 
 if __name__ == '__main__':

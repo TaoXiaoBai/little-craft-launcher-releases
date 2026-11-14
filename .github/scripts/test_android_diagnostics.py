@@ -162,7 +162,7 @@ class AndroidDiagnosticArtifactTests(unittest.TestCase):
         self.assertIn('--logs-dir "${RUNNER_TEMP}/private-build-logs"', block)
         self.assertNotIn("-inkey", block)
 
-    def test_only_ciphertext_and_opt_in_apk_are_uploaded(self):
+    def test_only_safe_summary_ciphertext_and_opt_in_apk_are_uploaded(self):
         encrypted = "\n".join(step("Retain encrypted Android diagnostics only"))
         self.assertIn("if: always()", encrypted)
         self.assertIn("path: ${{ runner.temp }}/diagnostics-android.p7m", encrypted)
@@ -173,6 +173,7 @@ class AndroidDiagnosticArtifactTests(unittest.TestCase):
         uploads = [line.strip() for line in WORKFLOW.read_text().splitlines()
                    if line.strip().startswith("path:")]
         self.assertEqual(uploads, ["path: builder", "path: source",
+                                  "path: ${{ runner.temp }}/safe-diagnostics/android/summary.json",
                                   "path: ${{ runner.temp }}/diagnostics-android.p7m",
                                   "path: ${{ runner.temp }}/apk-out/*.apk"])
 
@@ -207,6 +208,7 @@ class WindowsDiagnosticArtifactTests(unittest.TestCase):
                  if line.strip().startswith("path:")]
         self.assertEqual(paths, ["path: builder", "path: source",
                                  "path: ${{ runner.temp }}/mcl-ci-archives",
+                                 "path: ${{ runner.temp }}/safe-diagnostics/windows-build/summary.json",
                                  "path: ${{ runner.temp }}/diagnostics-windows-build.p7m"])
 
 

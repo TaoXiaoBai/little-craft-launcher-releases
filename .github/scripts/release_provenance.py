@@ -105,12 +105,17 @@ def combined_proof(proof):
 
 
 def validate_receipt(receipt):
-    require(isinstance(receipt, dict) and set(receipt) == RECEIPT_KEYS,
+    require(isinstance(receipt, dict) and type(receipt.get('schemaVersion')) is int
+            and receipt['schemaVersion'] in (1, 2),
             'INVALID_RELEASE_RECEIPT')
-    require(type(receipt['schemaVersion']) is int and receipt['schemaVersion'] == 1
-            and receipt['kind'] == 'LCL_RELEASE_PROVENANCE'
+    expected_keys = RECEIPT_KEYS | ({'purpose'} if receipt['schemaVersion'] == 2 else set())
+    require(set(receipt) == expected_keys, 'INVALID_RELEASE_RECEIPT')
+    require(receipt['kind'] == 'LCL_RELEASE_PROVENANCE'
             and receipt['platform'] in FILENAMES and receipt['fullSuite'] is True,
             'INVALID_RELEASE_RECEIPT')
+    if receipt['schemaVersion'] == 2:
+        require(isinstance(receipt['purpose'], str) and receipt['purpose'] in ('test', 'release'),
+                'INVALID_RELEASE_PURPOSE')
     for key in ('repositorySha256', 'sourceIdentitySha256', 'distributionConfigSha256'):
         require(ctest.hex_value(receipt[key], 64), 'INVALID_RELEASE_IDENTITY')
     require(ctest.hex_value(receipt['workflowCommit'], 40), 'INVALID_RELEASE_IDENTITY')
@@ -128,7 +133,8 @@ def validate_receipt(receipt):
             'INVALID_RELEASE_RUNTIME')
 
 
-def create_receipt(proof, runtime, tag, platform, environment=os.environ, *, build_dir=None):
+def create_receipt(proof, runtime, tag, platform, environment=os.environ, *, build_dir=None, purpose=None):
+    require(isinstance(purpose, str) and purpose in ('test', 'release'), 'INVALID_RELEASE_PURPOSE')
     combined_proof(proof)
     repository, workflow_sha, run_id, attempt = ctest.actions_identity(environment)
     repository_name(repository); version_tag(tag)
@@ -137,7 +143,7 @@ def create_receipt(proof, runtime, tag, platform, environment=os.environ, *, bui
             and proof['workflowCommit'] == workflow_sha and proof['runId'] == run_id
             and proof['runAttempt'] == attempt, 'RELEASE_PROOF_NOT_CURRENT')
     runtime = runtime_identity(runtime)
-    receipt = dict(schemaVersion=1, kind='LCL_RELEASE_PROVENANCE',
+    receipt = dict(schemaVersion=2, kind='LCL_RELEASE_PROVENANCE', purpose=purpose,
         repositorySha256=proof['repositorySha256'], workflowCommit=workflow_sha,
         runId=run_id, runAttempt=attempt, platform=platform, tag=tag,
         sourceIdentitySha256=ctest.digest({key: proof[key] for key in
@@ -246,7 +252,8 @@ def verified_receipt(repository, repo, tag, run_id, platform, github):
     return receipt
 
 
-def verify_release(repository, tag, windows_run_id, linux_run_id, assets, github=None):
+def verify_release(repository, tag, windows_run_id, linux_run_id, assets, github=None, *, verify_only=False):
+    require(type(verify_only) is bool, 'INVALID_RELEASE_VERIFY_MODE')
     repo = repository_name(repository); version_tag(tag)
     github = github or ctest.GitHub()
     metadata = github.json(f'repos/{repo}')
@@ -256,6 +263,9 @@ def verify_release(repository, tag, windows_run_id, linux_run_id, assets, github
     receipts = []
     for platform, run_id in (('windows-x64', windows_run_id), ('linux-x86_64', linux_run_id)):
         receipt = verified_receipt(metadata, repo, tag, run_id, platform, github)
+        if not verify_only:
+            require(receipt['schemaVersion'] == 2 and receipt.get('purpose') == 'release',
+                    'RELEASE_PURPOSE_NOT_PUBLISHABLE')
         require(runtime_identity(Path(assets) / receipt['runtime']['name']) == receipt['runtime'],
                 'RELEASE_RUNTIME_DIGEST_MISMATCH')
         receipts.append(receipt)
@@ -295,6 +305,7 @@ def main(argv=None):
     create.add_argument('--build-dir', type=Path, required=True)
     create.add_argument('--tag', required=True)
     create.add_argument('--platform', choices=tuple(FILENAMES), required=True)
+    create.add_argument('--purpose', choices=('test', 'release'), required=True)
     create.add_argument('--output', type=Path, required=True)
     verify = commands.add_parser('verify-runs')
     verify.add_argument('--repository', default=os.environ.get('GITHUB_REPOSITORY', ''))
@@ -302,15 +313,18 @@ def main(argv=None):
     verify.add_argument('--windows-run-id', type=int, required=True)
     verify.add_argument('--linux-run-id', type=int, required=True)
     verify.add_argument('--assets', type=Path, required=True)
+    verify.add_argument('--verify-only', action='store_true')
     args = parser.parse_args(argv)
     try:
         if args.operation == 'create':
             proof = ctest.read_json(ordinary_file(args.proof))
-            receipt = create_receipt(proof, args.runtime, args.tag, args.platform, build_dir=args.build_dir)
+            receipt = create_receipt(proof, args.runtime, args.tag, args.platform,
+                                     build_dir=args.build_dir, purpose=args.purpose)
             write_receipt(args.output, receipt)
             print('RELEASE_PROVENANCE_CREATED')
         else:
-            verify_release(args.repository, args.tag, args.windows_run_id, args.linux_run_id, args.assets)
+            verify_release(args.repository, args.tag, args.windows_run_id, args.linux_run_id, args.assets,
+                           verify_only=args.verify_only)
             print('RELEASE_PROVENANCE_VERIFIED')
     except ctest.ProofError as error:
         print('RELEASE_PROVENANCE_REJECTED:' + error.code)

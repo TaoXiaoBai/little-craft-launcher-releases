@@ -177,6 +177,30 @@ jobs:
           fi
           echo 'Android debug APK built and validated.'
 
+      - name: Write safe CI summary (android)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 builder/.github/scripts/ci_safe_diagnostics.py create \
+            --source-root "$GITHUB_WORKSPACE/source" \
+            --logs-dir "$RUNNER_TEMP/private-build-logs" \
+            --platform android --status "$SAFE_JOB_STATUS" \
+            --output "$RUNNER_TEMP/safe-diagnostics/android/summary.json"
+
+      - name: Retain safe CI summary (android)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-android-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/android/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Encrypt private Android diagnostics
         if: always()
         continue-on-error: true

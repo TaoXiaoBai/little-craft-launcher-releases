@@ -880,6 +880,7 @@ class VerifiedWorkflowTests(unittest.TestCase):
                     self.assertEqual(len(commands), 2)
                     self.assertTrue(commands[0][0].endswith("/release_provenance.py"))
                     self.assertEqual(commands[0][1], "verify-runs")
+                    self.assertEqual("--verify-only" in commands[0], verify_only)
                     self.assertIn("--windows-run-id", commands[0])
                     self.assertIn("--linux-run-id", commands[0])
                     self.assertTrue(commands[1][0].endswith("/publish-prerelease.py"))
