@@ -1,0 +1,547 @@
+From 9d2a4cc6241fed55864fa427a14e38ec6f766027 Mon Sep 17 00:00:00 2001
+From: Tao Xiaobai <1599170798@qq.com>
+Date: Sat, 14 Nov 2026 10:23:42 +0000
+Subject: [PATCH] Little Craft Launcher: package with a Qt host and enter
+ through LclGameEntryActivity
+
+- The application id, name and provider authorities are the host's; arm64-v8a
+  only; minSdk 29.
+- Optional :lcl_host library module packages a prepared Qt application
+  directory (-PlclHostDir) whose QtActivity becomes the launcher entry.
+- The runtime works inside the host's app-private data root: game files in
+  cache/minecraft, instances in game/<id>.
+- LclGameEntryActivity turns a host launch request into the runtime's profile
+  and account records, ensures a Java runtime and starts MainActivity.
+---
+ app_pojavlauncher/build.gradle                |  48 ++--
+ .../src/main/AndroidManifest.xml              |  17 +-
+ .../main/java/net/kdt/pojavlaunch/Tools.java  |  20 +-
+ .../pojavlaunch/lcl/LclGameEntryActivity.java | 217 ++++++++++++++++++
+ lcl_host/build.gradle                         |  49 ++++
+ lcl_host/src/main/AndroidManifest.xml         |  30 +++
+ settings.gradle                               |   6 +
+ 7 files changed, 354 insertions(+), 33 deletions(-)
+ create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+ create mode 100644 lcl_host/build.gradle
+ create mode 100644 lcl_host/src/main/AndroidManifest.xml
+
+diff --git a/app_pojavlauncher/build.gradle b/app_pojavlauncher/build.gradle
+index 11a696b..c2e0c3d 100644
+--- a/app_pojavlauncher/build.gradle
++++ b/app_pojavlauncher/build.gradle
+@@ -65,6 +65,10 @@ def getCFApiKey = {
+     return "DUMMY";
+ }
+ 
++// Little Craft Launcher packaging: the application id and name of the host.
++def lclApplicationId = providers.gradleProperty('lclApplicationId').getOrElse('org.littlecraftlauncher.android')
++def lclAppName = providers.gradleProperty('lclAppName').getOrElse('Little Craft')
++
+ configurations {
+     instrumentedClasspath {
+         canBeConsumed = false
+@@ -100,11 +104,15 @@ android {
+     }
+ 
+     defaultConfig {
+-        applicationId "org.angelauramc.amethyst"
+-        minSdkVersion 21
++        applicationId lclApplicationId
++        minSdkVersion 29
+         targetSdkVersion 34
+-        versionCode 10000000
+-        versionName getVersionName()
++        versionCode((providers.gradleProperty('lclVersionCode').getOrElse('1')) as int)
++        versionName providers.gradleProperty('lclVersionName').getOrElse(getVersionName())
++        ndk {
++            // The Qt host application is built for arm64-v8a only.
++            abiFilters 'arm64-v8a'
++        }
+         multiDexEnabled true //important
+         resValue 'string', 'curseforge_api_key', getCFApiKey()
+         externalNativeBuild {
+@@ -117,16 +125,15 @@ android {
+ 
+     buildTypes {
+         debug {
+-            applicationIdSuffix '.debug'
+             minifyEnabled false
+             shrinkResources false
+             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+             signingConfig signingConfigs.customDebug
+-            resValue "string", "app_name", "Amethyst (Debug)"
+-            resValue "string", "app_short_name", "Amethyst (Debug)"
+-            resValue 'string', 'application_package', 'org.angelauramc.amethyst.debug'
+-            resValue 'string', 'storageProviderAuthorities', 'org.angelauramc.amethyst.scoped.gamefolder.debug'
+-            resValue 'string', 'shareProviderAuthority', 'org.angelauramc.amethyst.scoped.controlfolder.debug'
++            resValue "string", "app_name", lclAppName
++            resValue "string", "app_short_name", lclAppName
++            resValue 'string', 'application_package', lclApplicationId
++            resValue 'string', 'storageProviderAuthorities', lclApplicationId + '.scoped.gamefolder'
++            resValue 'string', 'shareProviderAuthority', lclApplicationId + '.scoped.controlfolder'
+         }
+         proguard {
+             initWith debug
+@@ -146,10 +153,11 @@ android {
+             // defaultConfig already set
+             // multiDexEnabled = true
+             // debuggable = true
+-            resValue "string", "app_name", "Amethyst"
+-            resValue "string", "app_short_name", "Amethyst"
+-            resValue 'string', 'storageProviderAuthorities', 'org.angelauramc.amethyst.scoped.gamefolder'
+-            resValue 'string', 'application_package', 'org.angelauramc.amethyst'
++            resValue "string", "app_name", lclAppName
++            resValue "string", "app_short_name", lclAppName
++            resValue 'string', 'storageProviderAuthorities', lclApplicationId + '.scoped.gamefolder'
++            resValue 'string', 'shareProviderAuthority', lclApplicationId + '.scoped.controlfolder'
++            resValue 'string', 'application_package', lclApplicationId
+         }
+         gplay {
+             initWith release
+@@ -183,7 +191,7 @@ android {
+             // If you're debugging mesa libs, put them here, android will strip them
+             // and not properly link to source files, very smart android studio.
+             keepDebugSymbols += ['**/libcutils.so']
+-            pickFirsts += ['**/libbytehook.so']
++            pickFirsts += ['**/libbytehook.so', '**/libc++_shared.so']
+         }
+     }
+ 
+@@ -195,6 +203,11 @@ android {
+     lint {
+         abortOnError false
+     }
++
++    androidResources {
++        // Qt reads its bundled binary resources straight from the APK.
++        noCompress += ['rcc']
++    }
+ }
+ 
+ afterEvaluate {
+@@ -253,5 +266,10 @@ dependencies {
+ 
+     implementation project(":androidnsbypass")
+ 
++    // The Qt host application, when this build was given one (-PlclHostDir=...).
++    if (findProject(':lcl_host') != null) {
++        implementation project(':lcl_host')
++    }
++
+ }
+ apply from: rootProject.file('gradle/prefab_bypass.gradle')
+diff --git a/app_pojavlauncher/src/main/AndroidManifest.xml b/app_pojavlauncher/src/main/AndroidManifest.xml
+index 296fb5a..9f0700b 100644
+--- a/app_pojavlauncher/src/main/AndroidManifest.xml
++++ b/app_pojavlauncher/src/main/AndroidManifest.xml
+@@ -47,17 +47,18 @@
+             android:name="android.max_aspect"
+             android:value="ratio_float" />
+ 
++        <!-- Little Craft Launcher: the Qt host activity is the launcher entry;
++             the runtime is entered through LclGameEntryActivity only. -->
+         <activity
+             android:name=".TestStorageActivity"
+-            android:exported="true"
++            android:exported="false"
+             android:label="@string/app_short_name"
+-            android:launchMode="singleTop">
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-
+-                <category android:name="android.intent.category.LAUNCHER" />
+-            </intent-filter>
+-        </activity>
++            android:launchMode="singleTop" />
++        <activity
++            android:name=".lcl.LclGameEntryActivity"
++            android:exported="false"
++            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|keyboard|navigation|uiMode"
++            android:launchMode="singleTop" />
+         <activity
+             android:name=".LauncherActivity"
+             android:label="@string/app_short_name"
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+index bf198fa..241eaf2 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+@@ -155,12 +155,12 @@ public final class Tools {
+     public static String[] sAsmVersion = null;
+ 
+ 
++    // Little Craft Launcher: the runtime works inside the host launcher's
++    // app-private data root, whose game files live in "cache/minecraft" and
++    // whose instances live in "game/<id>".
++    public static final String LCL_GAME_FILES = "/cache/minecraft";
+     private static File getPojavStorageRoot(Context ctx) {
+-        if(SDK_INT >= 29) {
+-            return ctx.getExternalFilesDir(null);
+-        }else{
+-            return new File(Environment.getExternalStorageDirectory(),"games/Amethyst");
+-        }
++        return new File(ctx.getFilesDir(), "launcher");
+     }
+ 
+     /**
+@@ -169,9 +169,9 @@ public final class Tools {
+      * @return true if storage is fine, false if storage is not accessible
+      */
+     public static boolean checkStorageRoot(Context context) {
+-        File externalFilesDir = DIR_GAME_HOME  == null ? Tools.getPojavStorageRoot(context) : new File(DIR_GAME_HOME);
+-        //externalFilesDir == null when the storage is not mounted if it was obtained with the context call
+-        return externalFilesDir != null && Environment.getExternalStorageState(externalFilesDir).equals(Environment.MEDIA_MOUNTED);
++        // App-private internal storage is always mounted; make sure it exists.
++        File root = Tools.getPojavStorageRoot(context);
++        return root.isDirectory() || root.mkdirs();
+     }
+ 
+     /**
+@@ -212,7 +212,7 @@ public final class Tools {
+     public static void initStorageConstants(Context ctx){
+         initEarlyConstants(ctx);
+         DIR_GAME_HOME = getPojavStorageRoot(ctx).getAbsolutePath();
+-        DIR_GAME_NEW = DIR_GAME_HOME + "/.minecraft";
++        DIR_GAME_NEW = DIR_GAME_HOME + LCL_GAME_FILES;
+         DIR_HOME_VERSION = DIR_GAME_NEW + "/versions";
+         DIR_HOME_LIBRARY = DIR_GAME_NEW + "/libraries";
+         DIR_HOME_CRASH = DIR_GAME_NEW + "/crash-reports";
+@@ -1812,7 +1812,7 @@ public final class Tools {
+         if(isDemo) {
+             DIR_GAME_NEW = DIR_DATA + "/demo/.minecraft";
+         } else {
+-            DIR_GAME_NEW = DIR_GAME_HOME + "/.minecraft";
++            DIR_GAME_NEW = DIR_GAME_HOME + LCL_GAME_FILES;
+         }
+         DIR_HOME_VERSION = DIR_GAME_NEW + "/versions";
+         DIR_HOME_LIBRARY = DIR_GAME_NEW + "/libraries";
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+new file mode 100644
+index 0000000..0ecd6fd
+--- /dev/null
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+@@ -0,0 +1,217 @@
++package net.kdt.pojavlaunch.lcl;
++
++import android.content.Intent;
++import android.graphics.Color;
++import android.os.Bundle;
++import android.util.Log;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.Button;
++import android.widget.LinearLayout;
++import android.widget.ProgressBar;
++import android.widget.ScrollView;
++import android.widget.TextView;
++
++import androidx.appcompat.app.AppCompatActivity;
++
++import net.kdt.pojavlaunch.JMinecraftVersionList;
++import net.kdt.pojavlaunch.MainActivity;
++import net.kdt.pojavlaunch.NewJREUtil;
++import net.kdt.pojavlaunch.PojavApplication;
++import net.kdt.pojavlaunch.PojavProfile;
++import net.kdt.pojavlaunch.Tools;
++import net.kdt.pojavlaunch.prefs.LauncherPreferences;
++import net.kdt.pojavlaunch.progresskeeper.ProgressKeeper;
++import net.kdt.pojavlaunch.tasks.AsyncAssetManager;
++import net.kdt.pojavlaunch.value.MinecraftAccount;
++import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
++import net.kdt.pojavlaunch.value.launcherprofiles.MinecraftProfile;
++
++import java.io.File;
++import java.io.PrintWriter;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.util.UUID;
++
++/**
++ * The single entry point through which the Little Craft Launcher host starts a
++ * game. The host has already installed and verified the game files in its data
++ * root; this activity only turns the request into the runtime's own profile and
++ * account records, makes sure a suitable Java runtime is present, and hands
++ * over to {@link MainActivity}.
++ *
++ * Intent extras (all strings unless noted):
++ *   lcl.version_id    version to run, a directory of cache/minecraft/versions
++ *   lcl.game_dir      instance directory relative to the data root, "game/<id>"
++ *   lcl.name          display name of the instance
++ *   lcl.username      player name
++ *   lcl.uuid          player profile id
++ *   lcl.access_token  access token, or absent/"0" for an offline player
++ *   lcl.microsoft     boolean, whether the token is a Microsoft account token
++ *   lcl.xuid          optional Xbox user id
++ *   lcl.java_args     optional extra JVM arguments
++ */
++public class LclGameEntryActivity extends AppCompatActivity {
++    public static final String EXTRA_VERSION_ID = "lcl.version_id";
++    public static final String EXTRA_GAME_DIR = "lcl.game_dir";
++    public static final String EXTRA_NAME = "lcl.name";
++    public static final String EXTRA_USERNAME = "lcl.username";
++    public static final String EXTRA_UUID = "lcl.uuid";
++    public static final String EXTRA_ACCESS_TOKEN = "lcl.access_token";
++    public static final String EXTRA_MICROSOFT = "lcl.microsoft";
++    public static final String EXTRA_XUID = "lcl.xuid";
++    public static final String EXTRA_JAVA_ARGS = "lcl.java_args";
++    private static final String TAG = "LclGameEntry";
++
++    private TextView mStatus;
++    private ProgressBar mProgress;
++    private Button mClose;
++
++    @Override
++    protected void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        buildLayout();
++        final Intent request = getIntent();
++        PojavApplication.sExecutorService.execute(() -> {
++            try {
++                prepare(request);
++            } catch (Throwable throwable) {
++                Log.e(TAG, "Could not prepare the game", throwable);
++                showFailure(throwable);
++            }
++        });
++    }
++
++    private void buildLayout() {
++        int padding = (int) (24 * getResources().getDisplayMetrics().density);
++        LinearLayout root = new LinearLayout(this);
++        root.setOrientation(LinearLayout.VERTICAL);
++        root.setGravity(Gravity.CENTER_HORIZONTAL);
++        root.setPadding(padding, padding, padding, padding);
++        root.setBackgroundColor(Color.rgb(0x1b, 0x23, 0x1b));
++        mProgress = new ProgressBar(this);
++        root.addView(mProgress);
++        mStatus = new TextView(this);
++        mStatus.setTextColor(Color.WHITE);
++        mStatus.setTextIsSelectable(true);
++        mStatus.setPadding(0, padding / 2, 0, padding / 2);
++        ScrollView scroll = new ScrollView(this);
++        scroll.addView(mStatus);
++        root.addView(scroll, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
++        mClose = new Button(this);
++        mClose.setText(android.R.string.cancel);
++        mClose.setVisibility(View.GONE);
++        mClose.setOnClickListener(v -> finish());
++        root.addView(mClose);
++        setContentView(root);
++        setStatus("Preparing the game runtime…");
++    }
++
++    private void setStatus(String text) {
++        runOnUiThread(() -> mStatus.setText(text));
++    }
++
++    private void showFailure(Throwable throwable) {
++        StringWriter trace = new StringWriter();
++        throwable.printStackTrace(new PrintWriter(trace));
++        runOnUiThread(() -> {
++            mProgress.setVisibility(View.GONE);
++            mClose.setVisibility(View.VISIBLE);
++            mStatus.setText("The game could not be started.\n\n" + trace);
++        });
++    }
++
++    private static String required(Intent request, String key) {
++        String value = request.getStringExtra(key);
++        if (value == null || value.trim().isEmpty())
++            throw new IllegalArgumentException("Missing launch parameter " + key);
++        return value;
++    }
++
++    /** Only plain relative paths below the data root are accepted. */
++    private static String checkedRelative(String path) {
++        if (path.startsWith("/") || path.contains("\\") || path.contains(":"))
++            throw new IllegalArgumentException("The instance directory must be relative");
++        for (String part : path.split("/"))
++            if (part.isEmpty() || part.equals(".") || part.equals(".."))
++                throw new IllegalArgumentException("The instance directory is not a plain path");
++        return path;
++    }
++
++    private void prepare(Intent request) throws Throwable {
++        final String versionId = required(request, EXTRA_VERSION_ID);
++        final String gameDir = checkedRelative(required(request, EXTRA_GAME_DIR));
++        final String username = required(request, EXTRA_USERNAME);
++        if (!username.matches("[A-Za-z0-9_]{1,16}"))
++            throw new IllegalArgumentException("The player name is not a valid Minecraft name");
++        if (!versionId.matches("[A-Za-z0-9._+ -]{1,128}") || versionId.contains(".."))
++            throw new IllegalArgumentException("The version id is not valid");
++
++        // Implicitly initialises every storage constant of the runtime.
++        LauncherPreferences.loadPreferences(this);
++        File instanceDir = new File(Tools.DIR_GAME_HOME, gameDir);
++        File versionJson = new File(Tools.DIR_HOME_VERSION, versionId + "/" + versionId + ".json");
++        if (!instanceDir.isDirectory())
++            throw new IllegalStateException("The instance directory does not exist: " + gameDir);
++        if (!versionJson.isFile())
++            throw new IllegalStateException("The version " + versionId + " is not installed");
++
++        setStatus("Unpacking runtime components…");
++        AsyncAssetManager.unpackComponents(this);
++        AsyncAssetManager.unpackSingleFiles(this);
++
++        // The runtime's own account record for this player.
++        MinecraftAccount account = new MinecraftAccount();
++        account.username = username;
++        String uuid = request.getStringExtra(EXTRA_UUID);
++        if (uuid != null && !uuid.isEmpty()) account.profileId = uuid;
++        String token = request.getStringExtra(EXTRA_ACCESS_TOKEN);
++        account.accessToken = token == null || token.isEmpty() ? "0" : token;
++        account.isMicrosoft = request.getBooleanExtra(EXTRA_MICROSOFT, false);
++        account.xuid = request.getStringExtra(EXTRA_XUID);
++        account.selectedVersion = versionId;
++        // The host owns token refresh; never let the runtime treat it as stale.
++        account.expiresAt = Long.MAX_VALUE;
++        File accounts = new File(Tools.DIR_ACCOUNT_NEW);
++        if (!accounts.isDirectory() && !accounts.mkdirs())
++            throw new IllegalStateException("Could not create the runtime account directory");
++        account.save();
++        // commit(): the game runs in another process and reads this from disk.
++        PojavProfile.getPrefs(this).edit().putString("file", username).commit();
++
++        // One stable runtime profile per host instance, so renderer and control
++        // choices made in the game are remembered for that instance.
++        LauncherProfiles.load();
++        String key = UUID.nameUUIDFromBytes(("lcl:" + gameDir).getBytes(StandardCharsets.UTF_8)).toString();
++        MinecraftProfile profile = LauncherProfiles.mainProfileJson.profiles.get(key);
++        if (profile == null) {
++            profile = MinecraftProfile.createTemplate();
++            LauncherProfiles.mainProfileJson.profiles.put(key, profile);
++        }
++        String name = request.getStringExtra(EXTRA_NAME);
++        profile.name = name == null || name.isEmpty() ? versionId : name;
++        profile.lastVersionId = versionId;
++        profile.gameDir = Tools.LAUNCHERPROFILES_RTPREFIX + gameDir;
++        String javaArgs = request.getStringExtra(EXTRA_JAVA_ARGS);
++        profile.javaArgs = javaArgs == null || javaArgs.trim().isEmpty() ? null : javaArgs;
++        LauncherProfiles.write();
++        LauncherPreferences.DEFAULT_PREF.edit()
++                .putString(LauncherPreferences.PREF_KEY_CURRENT_PROFILE, key).commit();
++
++        setStatus("Checking the Java runtime…\nThe first start of a game version may download one.");
++        JMinecraftVersionList.Version versionInfo = Tools.getVersionInfo(versionId);
++        if (!NewJREUtil.installNewJreIfNeeded(this, versionInfo))
++            throw new IllegalStateException("No compatible Java runtime is available for " + versionId);
++
++        setStatus("Starting Minecraft " + versionId + "…");
++        ProgressKeeper.waitUntilDone(() -> runOnUiThread(() -> {
++            if (isFinishing() || isDestroyed()) return;
++            Intent game = new Intent(this, MainActivity.class);
++            game.putExtra(MainActivity.INTENT_MINECRAFT_VERSION, versionId);
++            game.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
++            startActivity(game);
++            finish();
++        }));
++    }
++}
+diff --git a/lcl_host/build.gradle b/lcl_host/build.gradle
+new file mode 100644
+index 0000000..72eff91
+--- /dev/null
++++ b/lcl_host/build.gradle
+@@ -0,0 +1,49 @@
++// Packages a prepared Qt host application directory (the output directory of
++// androiddeployqt: libs/, assets/, res/, gradle.properties) as an Android
++// library, so the runtime application module can ship it in the same APK.
++// It contains no source of the host; pass -PlclHostDir=<directory>.
++plugins {
++    id 'com.android.library'
++}
++
++def hostDir = file(providers.gradleProperty('lclHostDir').get())
++def hostProperties = new Properties()
++new File(hostDir, 'gradle.properties').withInputStream { hostProperties.load(it) }
++def qtAndroidDir = hostProperties.getProperty('qtAndroidDir')
++if (qtAndroidDir == null) throw new GradleException("lclHostDir has no qtAndroidDir in gradle.properties")
++
++android {
++    namespace 'org.littlecraftlauncher.host'
++    compileSdk = 37
++
++    defaultConfig {
++        minSdkVersion 29
++        manifestPlaceholders = [
++                lclQtLibName: providers.gradleProperty('lclQtLibName').getOrElse('mcl-android')
++        ]
++    }
++
++    sourceSets {
++        main {
++            manifest.srcFile 'src/main/AndroidManifest.xml'
++            java.srcDirs = [qtAndroidDir + '/src', new File(hostDir, 'src')]
++            res.srcDirs = [qtAndroidDir + '/res', new File(hostDir, 'res')]
++            assets.srcDirs = [new File(hostDir, 'assets')]
++            jniLibs.srcDirs = [new File(hostDir, 'libs')]
++        }
++    }
++
++    compileOptions {
++        sourceCompatibility JavaVersion.VERSION_1_8
++        targetCompatibility JavaVersion.VERSION_1_8
++    }
++
++    lint {
++        abortOnError false
++    }
++}
++
++dependencies {
++    api fileTree(dir: new File(hostDir, 'libs'), include: ['*.jar'])
++    implementation 'androidx.core:core:1.13.1'
++}
+diff --git a/lcl_host/src/main/AndroidManifest.xml b/lcl_host/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000..a5a23d6
+--- /dev/null
++++ b/lcl_host/src/main/AndroidManifest.xml
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <supports-screens
++        android:anyDensity="true"
++        android:largeScreens="true"
++        android:normalScreens="true"
++        android:smallScreens="true" />
++    <application android:hardwareAccelerated="true">
++        <!-- The Qt host interface: the launcher entry of the whole APK. -->
++        <activity
++            android:name="org.qtproject.qt.android.bindings.QtActivity"
++            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
++            android:exported="true"
++            android:launchMode="singleTop"
++            android:screenOrientation="unspecified"
++            android:theme="@android:style/Theme.Material.Light.NoActionBar"
++            android:windowSoftInputMode="adjustResize">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++            <meta-data
++                android:name="android.app.lib_name"
++                android:value="${lclQtLibName}" />
++            <meta-data
++                android:name="android.app.arguments"
++                android:value="" />
++        </activity>
++    </application>
++</manifest>
+diff --git a/settings.gradle b/settings.gradle
+index e2626f6..9f31c56 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -24,3 +24,9 @@ include ':arc_dns_injector'
+ include ':MioLibPatcher'
+ include ':forge_installer'
+ include ':androidnsbypass'
++
++// Little Craft Launcher: optionally package a prepared Qt host application
++// directory (the output directory of androiddeployqt) into this APK.
++if (providers.gradleProperty('lclHostDir').isPresent()) {
++    include ':lcl_host'
++}
+-- 
+2.43.0
+
