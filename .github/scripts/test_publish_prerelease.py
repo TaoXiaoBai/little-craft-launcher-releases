@@ -784,7 +784,8 @@ class VerifiedWorkflowTests(unittest.TestCase):
         self.text = workflow.read_text(encoding="utf-8")
         self.program = textwrap.dedent(self.text.split("python3 <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
 
-    def verify(self, tag, wayland_count=0, linux_success=True):
+    def verify(self, tag, wayland_count=0, linux_success=True, *, missing_receipt=None,
+               receipt_attempt=1, current_attempt=1):
         def api(command, **options):
             self.assertEqual(command[:2], ["gh", "api"])
             path = command[2]
@@ -796,6 +797,7 @@ class VerifiedWorkflowTests(unittest.TestCase):
                     result = {"repository": {"full_name": REPOSITORY},
                               "head_repository": {"full_name": REPOSITORY},
                               "event": "workflow_dispatch", "head_branch": "main", "workflow_id": 51,
+                              "run_attempt": current_attempt,
                               "display_title": f"Prerelease {tag} (both)"}
                 elif "/jobs?" in path:
                     platform = "windows-x64" if run_id == "1" else "linux-x86_64"
@@ -804,6 +806,9 @@ class VerifiedWorkflowTests(unittest.TestCase):
                 elif "/artifacts?" in path:
                     names = (["release-windows-x64", "release-qt-dependency-sources"] if run_id == "1" else
                              ["release-linux-x86_64"] + ["release-qt-wayland-source"] * wayland_count)
+                    platform = "windows-x64" if run_id == "1" else "linux-x86_64"
+                    if platform != missing_receipt:
+                        names.append(f"provenance-{platform}-attempt-{receipt_attempt}")
                     result = {"artifacts": [{"name": name, "expired": False} for name in names]}
                 else:
                     raise AssertionError("Unexpected provenance API request")
@@ -828,6 +833,61 @@ class VerifiedWorkflowTests(unittest.TestCase):
     def test_present_sources_cannot_override_a_failed_linux_build(self):
         with self.assertRaisesRegex(RuntimeError, "did not succeed"):
             self.verify("v1.0.0-pre.5", wayland_count=1, linux_success=False)
+
+    def test_both_runtime_packages_and_source_archives_cannot_replace_a_missing_receipt(self):
+        for platform in ("windows-x64", "linux-x86_64"):
+            with self.subTest(platform=platform):
+                with self.assertRaisesRegex(RuntimeError, "absent, expired or ambiguous"):
+                    self.verify("v1.0.0-pre.5", wayland_count=1, missing_receipt=platform)
+
+    def test_a_previous_attempt_receipt_does_not_authorize_the_current_attempt(self):
+        with self.assertRaisesRegex(RuntimeError, "absent, expired or ambiguous"):
+            self.verify("v1.0.0-pre.5", wayland_count=1, current_attempt=2, receipt_attempt=1)
+        self.verify("v1.0.0-pre.5", wayland_count=1, current_attempt=2, receipt_attempt=2)
+
+    def test_a_valid_current_attempt_is_required_before_receipt_lookup(self):
+        for value in (None, True, 0, -1, "1"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "current build attempt"):
+                    self.verify("v1.0.0-pre.5", wayland_count=1, current_attempt=value)
+
+    @unittest.skipIf(sys.platform == "win32", "The publisher is an Ubuntu Bash step")
+    def test_verify_only_checks_provenance_and_packages_without_publishing_or_cleanup(self):
+        step = self.text.split("      - name: Verify packages and publish two downloads\n", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands_file = root / "commands.jsonl"
+            executable = root / "python3"
+            executable.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, os, sys\n"
+                "with open(os.environ['COMMANDS_FILE'], 'a') as output:\n"
+                "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n", encoding="utf-8")
+            executable.chmod(0o755)
+            for verify_only in (True, False):
+                with self.subTest(verify_only=verify_only):
+                    commands_file.write_text("", encoding="utf-8")
+                    environment = dict(PUBLISH.os.environ, COMMANDS_FILE=str(commands_file),
+                        PATH=str(root) + PUBLISH.os.pathsep + PUBLISH.os.environ.get("PATH", ""),
+                        GITHUB_REPOSITORY=REPOSITORY, VERSION_TAG="v1.0.0-pre.13",
+                        GITHUB_SHA=TARGET, WINDOWS_RUN_ID="1", LINUX_RUN_ID="2",
+                        VERIFY_ONLY="true" if verify_only else "false")
+                    subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                   env=environment, check=True, capture_output=True, text=True)
+                    commands = [json.loads(line) for line in commands_file.read_text().splitlines()]
+                    self.assertEqual(len(commands), 2)
+                    self.assertTrue(commands[0][0].endswith("/release_provenance.py"))
+                    self.assertEqual(commands[0][1], "verify-runs")
+                    self.assertIn("--windows-run-id", commands[0])
+                    self.assertIn("--linux-run-id", commands[0])
+                    self.assertTrue(commands[1][0].endswith("/publish-prerelease.py"))
+                    self.assertEqual("--verify-only" in commands[1], verify_only)
+        cleanup = self.text.split("      - name: Remove temporary packages after verifying the published prerelease\n", 1)[1]
+        condition = next(line for line in cleanup.splitlines() if line.lstrip().startswith("if:"))
+        self.assertIn("success()", condition)
+        self.assertIn("!inputs.verify_only", condition)
 
     def test_dispatch_only_download_and_static_reader_conditions(self):
         trigger = self.text.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
