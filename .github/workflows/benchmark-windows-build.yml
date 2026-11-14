@@ -78,6 +78,32 @@ jobs:
           path: ${{ runner.temp }}/mcl-ci-archives
           key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
 
+      - name: Write safe CI summary (windows-benchmark)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python builder/.github/scripts/ci_safe_diagnostics.py create `
+            --source-root (Join-Path $env:GITHUB_WORKSPACE 'source') `
+            --logs-dir (Join-Path $env:RUNNER_TEMP 'private-build-benchmark-logs') `
+            --platform windows-benchmark --status $env:SAFE_JOB_STATUS `
+            --output (Join-Path $env:RUNNER_TEMP 'safe-diagnostics/windows-benchmark/summary.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Safe diagnostic summary could not be generated. Raw logs remain private.' }
+
+      - name: Retain safe CI summary (windows-benchmark)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-windows-benchmark-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/windows-benchmark/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Encrypt private compiler logs and Ninja scheduling metadata
         if: always()
         shell: pwsh

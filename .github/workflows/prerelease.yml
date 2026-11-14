@@ -275,13 +275,14 @@ jobs:
         shell: pwsh
         env:
           VERSION_TAG: ${{ inputs.tag }}
+          RELEASE_PURPOSE: ${{ inputs.source_commit && 'test' || 'release' }}
         run: |
           $ErrorActionPreference = 'Stop'
           & python builder/.github/scripts/release_provenance.py create `
             --proof (Join-Path $env:RUNNER_TEMP 'private-build-logs/windows-combined-proof.json') `
             --build-dir (Join-Path $env:GITHUB_WORKSPACE 'source/qt-native/build-ci') `
             --runtime (Join-Path $env:RUNNER_TEMP ('release-assets/LittleCraftLauncher-' + $env:VERSION_TAG + '-windows-x64.zip')) `
-            --platform windows-x64 --tag $env:VERSION_TAG `
+            --platform windows-x64 --tag $env:VERSION_TAG --purpose $env:RELEASE_PURPOSE `
             --output (Join-Path $env:RUNNER_TEMP 'release-provenance/windows.json')
           if ($LASTEXITCODE -ne 0) { throw 'Release provenance could not be established.' }
 
@@ -294,6 +295,32 @@ jobs:
           path: ${{ runner.temp }}/release-provenance/windows.json
           if-no-files-found: error
           retention-days: 3
+
+      - name: Write safe CI summary (windows-x64)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python builder/.github/scripts/ci_safe_diagnostics.py create `
+            --source-root (Join-Path $env:GITHUB_WORKSPACE 'source') `
+            --logs-dir (Join-Path $env:RUNNER_TEMP 'private-build-logs') `
+            --platform windows-x64 --status $env:SAFE_JOB_STATUS `
+            --output (Join-Path $env:RUNNER_TEMP 'safe-diagnostics/windows-x64/summary.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Safe diagnostic summary could not be generated. Raw logs remain private.' }
+
+      - name: Retain safe CI summary (windows-x64)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-windows-x64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/windows-x64/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Encrypt private diagnostics
         if: always()
@@ -538,12 +565,13 @@ jobs:
         if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' }}
         env:
           VERSION_TAG: ${{ inputs.tag }}
+          RELEASE_PURPOSE: ${{ inputs.source_commit && 'test' || 'release' }}
         run: |
           python3 builder/.github/scripts/release_provenance.py create \
             --proof "$RUNNER_TEMP/private-build-logs/linux-combined-proof.json" \
             --build-dir "$RUNNER_TEMP/build-linux" \
             --runtime "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.AppImage" \
-            --platform linux-x86_64 --tag "$VERSION_TAG" \
+            --platform linux-x86_64 --tag "$VERSION_TAG" --purpose "$RELEASE_PURPOSE" \
             --output "$RUNNER_TEMP/release-provenance/linux.json"
 
       - name: Retain Linux release provenance
@@ -555,6 +583,30 @@ jobs:
           path: ${{ runner.temp }}/release-provenance/linux.json
           if-no-files-found: error
           retention-days: 3
+
+      - name: Write safe CI summary (linux-x86_64)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 builder/.github/scripts/ci_safe_diagnostics.py create \
+            --source-root "$GITHUB_WORKSPACE/source" \
+            --logs-dir "$RUNNER_TEMP/private-build-logs" \
+            --platform linux-x86_64 --status "$SAFE_JOB_STATUS" \
+            --output "$RUNNER_TEMP/safe-diagnostics/linux-x86_64/summary.json"
+
+      - name: Retain safe CI summary (linux-x86_64)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-linux-x86_64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/linux-x86_64/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Encrypt private diagnostics
         if: always()
@@ -700,6 +752,32 @@ jobs:
           path: ${{ runner.temp }}/mcl-ci-archives
           key: windows-2022-native-archives-${{ hashFiles('source/qt-native/ci/toolchain-lock.json') }}
 
+      - name: Write safe CI summary (windows-ui-companion)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python builder/.github/scripts/ci_safe_diagnostics.py create `
+            --source-root (Join-Path $env:GITHUB_WORKSPACE 'source') `
+            --logs-dir (Join-Path $env:RUNNER_TEMP 'private-build-logs') `
+            --platform windows-ui-companion --status $env:SAFE_JOB_STATUS `
+            --output (Join-Path $env:RUNNER_TEMP 'safe-diagnostics/windows-ui-companion/summary.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Safe diagnostic summary could not be generated. Raw logs remain private.' }
+
+      - name: Retain safe CI summary (windows-ui-companion)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-windows-ui-companion-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/windows-ui-companion/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Encrypt private Windows companion diagnostics
         if: always()
         continue-on-error: true
@@ -837,6 +915,30 @@ jobs:
             exit 1
           fi
           echo 'Linux companion tests passed and their sanitized proof is ready.'
+
+      - name: Write safe CI summary (linux-ui-companion)
+        id: safe-diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SAFE_JOB_STATUS: ${{ job.status }}
+        run: |
+          python3 builder/.github/scripts/ci_safe_diagnostics.py create \
+            --source-root "$GITHUB_WORKSPACE/source" \
+            --logs-dir "$RUNNER_TEMP/private-build-logs" \
+            --platform linux-ui-companion --status "$SAFE_JOB_STATUS" \
+            --output "$RUNNER_TEMP/safe-diagnostics/linux-ui-companion/summary.json"
+
+      - name: Retain safe CI summary (linux-ui-companion)
+        if: ${{ always() && steps.safe-diagnostics.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: safe-diagnostics-linux-ui-companion-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/safe-diagnostics/linux-ui-companion/summary.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Encrypt private Linux companion diagnostics
         if: always()

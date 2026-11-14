@@ -170,11 +170,11 @@ jobs:
           LINUX_RUN_ID: ${{ inputs.linux_run_id }}
           VERIFY_ONLY: ${{ inputs.verify_only }}
         run: |
-          python3 release-tools/.github/scripts/release_provenance.py verify-runs \
-            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
-            --windows-run-id "$WINDOWS_RUN_ID" --linux-run-id "$LINUX_RUN_ID" --assets release-assets
           arguments=()
           if [[ "$VERIFY_ONLY" == 'true' ]]; then arguments+=(--verify-only); fi
+          python3 release-tools/.github/scripts/release_provenance.py verify-runs \
+            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
+            --windows-run-id "$WINDOWS_RUN_ID" --linux-run-id "$LINUX_RUN_ID" --assets release-assets "${arguments[@]}"
           python3 release-tools/.github/scripts/publish-prerelease.py \
             --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
             --target "$GITHUB_SHA" --assets release-assets "${arguments[@]}"
