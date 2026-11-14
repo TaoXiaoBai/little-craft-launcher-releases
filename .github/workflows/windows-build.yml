@@ -3,9 +3,9 @@
 #   SOURCE_REPOSITORY: owner/private-repo (never put a token in this value)
 #   SOURCE_READ_TOKEN: fine-grained PAT, only that repo, Contents: read
 # Optional SOURCE_REF: source branch/tag/full commit SHA; defaults to master.
-# This runs the existing Windows build + all 42 local CTest groups.
+# This runs the existing dynamic Windows build and all local CTest groups.
 # Logs and artifacts of a public repo are public: raw private build evidence
-# and application outputs are deliberately NOT uploaded by this CI-only file.
+# and application outputs are retained only as encrypted diagnostics.
 name: Windows build
 run-name: ${{ inputs.verify_access_only && 'Verify private-source access' || 'Build and test Windows' }}
 
@@ -36,6 +36,13 @@ jobs:
       run:
         shell: pwsh
     steps:
+      - name: Checkout public diagnostic tools
+        if: ${{ !inputs.verify_access_only }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: builder
+          persist-credentials: false
+
       - name: Validate configuration
         env:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
@@ -134,8 +141,40 @@ jobs:
           } catch {
             # Compiler/test diagnostics can contain source lines. Do not echo
             # exception bodies or upload these logs from this public workflow.
-            Write-Error -ErrorAction Continue 'Build failed. Detailed source logs remain on the ephemeral runner and are not published.'
+            Write-Error -ErrorAction Continue 'Build failed. Detailed source diagnostics are retained encrypted.'
             exit 1
           } finally {
             $env:GITHUB_SHA = $workflowSha
+            # The source test driver writes detailed subprocess logs and JUnit
+            # outside its console transcript. Keep those privately too.
+            try {
+              $evidence = Join-Path $env:RUNNER_TEMP 'mcl-ci-evidence-dynamic'
+              if (Test-Path -LiteralPath $evidence -PathType Container) {
+                Copy-Item -LiteralPath $evidence -Destination (Join-Path $privateLogs 'ctest') -Recurse -ErrorAction Stop
+              }
+            } catch {
+              Write-Warning 'Detailed test evidence could not be copied; captured stage logs remain private.'
+            }
           }
+
+      - name: Encrypt private Windows diagnostics
+        if: ${{ always() && !inputs.verify_access_only }}
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = Join-Path $env:RUNNER_TEMP 'private-build-logs'
+          $null = New-Item -ItemType Directory -Path $logs -Force
+          python builder/.github/scripts/encrypt-diagnostics.py `
+            --certificate builder/.github/scripts/diagnostics-certificate.pem --logs-dir $logs `
+            --output (Join-Path $env:RUNNER_TEMP 'diagnostics-windows-build.p7m') --exclude-screenshots
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic encryption failed. No raw files will be uploaded.' }
+
+      - name: Retain encrypted Windows diagnostics only
+        if: ${{ always() && !inputs.verify_access_only }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: encrypted-diagnostics-windows-build
+          path: ${{ runner.temp }}/diagnostics-windows-build.p7m
+          if-no-files-found: ignore
+          retention-days: 3
