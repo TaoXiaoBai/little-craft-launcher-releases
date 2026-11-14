@@ -1,4 +1,4 @@
-From 16875a955917f3fa2077f85ecadfe5c8fa8233aa Mon Sep 17 00:00:00 2001
+From 9f1582f3de998f2a7e8d0ba7dd73a74a80b814b7 Mon Sep 17 00:00:00 2001
 From: Tao Xiaobai <1599170798@qq.com>
 Date: Sat, 14 Nov 2026 10:23:42 +0000
 Subject: [PATCH] Little Craft Launcher: package with a Qt host and enter
@@ -13,14 +13,14 @@ Subject: [PATCH] Little Craft Launcher: package with a Qt host and enter
 - LclGameEntryActivity turns a host launch request into the runtime's profile
   and account records, ensures a Java runtime and starts MainActivity.
 ---
- app_pojavlauncher/build.gradle                |  50 ++--
+ app_pojavlauncher/build.gradle                |  50 +++-
  .../src/main/AndroidManifest.xml              |  17 +-
  .../main/java/net/kdt/pojavlaunch/Tools.java  |  20 +-
- .../pojavlaunch/lcl/LclGameEntryActivity.java | 217 ++++++++++++++++++
- lcl_host/build.gradle                         |  49 ++++
- lcl_host/src/main/AndroidManifest.xml         |  30 +++
+ .../pojavlaunch/lcl/LclGameEntryActivity.java | 281 ++++++++++++++++++
+ lcl_host/build.gradle                         |  49 +++
+ lcl_host/src/main/AndroidManifest.xml         |  30 ++
  settings.gradle                               |   6 +
- 7 files changed, 356 insertions(+), 33 deletions(-)
+ 7 files changed, 420 insertions(+), 33 deletions(-)
  create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
  create mode 100644 lcl_host/build.gradle
  create mode 100644 lcl_host/src/main/AndroidManifest.xml
@@ -227,10 +227,10 @@ index bf198fa..241eaf2 100644
          DIR_HOME_LIBRARY = DIR_GAME_NEW + "/libraries";
 diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
 new file mode 100644
-index 0000000..0ecd6fd
+index 0000000..0cbb573
 --- /dev/null
 +++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,281 @@
 +package net.kdt.pojavlaunch.lcl;
 +
 +import android.content.Intent;
@@ -256,14 +256,21 @@ index 0000000..0ecd6fd
 +import net.kdt.pojavlaunch.prefs.LauncherPreferences;
 +import net.kdt.pojavlaunch.progresskeeper.ProgressKeeper;
 +import net.kdt.pojavlaunch.tasks.AsyncAssetManager;
++import net.kdt.pojavlaunch.value.DependentLibrary;
 +import net.kdt.pojavlaunch.value.MinecraftAccount;
++import net.kdt.pojavlaunch.value.MinecraftLibraryArtifact;
 +import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
 +import net.kdt.pojavlaunch.value.launcherprofiles.MinecraftProfile;
 +
 +import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
 +import java.io.PrintWriter;
 +import java.io.StringWriter;
++import java.net.HttpURLConnection;
++import java.net.URL;
 +import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
 +import java.util.UUID;
 +
 +/**
@@ -372,6 +379,60 @@ index 0000000..0ecd6fd
 +        return path;
 +    }
 +
++    /**
++     * The runtime substitutes a few libraries of a version with releases that
++     * work on Android (JNA, oshi, ASM; see Tools.preProcessLibraries). The host
++     * installed the versions the game metadata names, so fetch the substitutes
++     * here. Only unconditional libraries with an explicit, hash-pinned artifact
++     * are fetched; platform-specific ones the host skipped stay skipped.
++     */
++    private void ensureSubstitutedLibraries(JMinecraftVersionList.Version versionInfo) throws Exception {
++        if (versionInfo.libraries == null) return;
++        for (DependentLibrary library : versionInfo.libraries) {
++            if (library == null || library.name == null || library.rules != null) continue;
++            if (library.downloads == null || library.downloads.artifact == null) continue;
++            MinecraftLibraryArtifact artifact = library.downloads.artifact;
++            if (artifact.url == null || artifact.sha1 == null || artifact.path == null) continue;
++            if (!artifact.url.startsWith("https://repo1.maven.org/maven2/")) continue;
++            if (!artifact.path.matches("[A-Za-z0-9._/+-]+\\.jar") || artifact.path.contains("..")) continue;
++            File target = new File(Tools.DIR_HOME_LIBRARY, artifact.path);
++            if (target.isFile()) continue;
++            setStatus("Downloading " + library.name + "…");
++            File parent = target.getParentFile();
++            if (parent == null || (!parent.isDirectory() && !parent.mkdirs()))
++                throw new IllegalStateException("Could not create the library directory for " + library.name);
++            File partial = new File(parent, target.getName() + ".lclpart");
++            MessageDigest digest = MessageDigest.getInstance("SHA-1");
++            HttpURLConnection connection = (HttpURLConnection) new URL(artifact.url).openConnection();
++            connection.setConnectTimeout(15000);
++            connection.setReadTimeout(30000);
++            try (InputStream input = connection.getInputStream();
++                 FileOutputStream output = new FileOutputStream(partial)) {
++                byte[] buffer = new byte[65536];
++                long total = 0;
++                int read;
++                while ((read = input.read(buffer)) != -1) {
++                    total += read;
++                    if (total > 64L * 1024 * 1024) throw new IllegalStateException("Library is unexpectedly large: " + library.name);
++                    digest.update(buffer, 0, read);
++                    output.write(buffer, 0, read);
++                }
++            } finally {
++                connection.disconnect();
++            }
++            StringBuilder hex = new StringBuilder();
++            for (byte b : digest.digest()) hex.append(String.format("%02x", b));
++            if (!hex.toString().equalsIgnoreCase(artifact.sha1)) {
++                partial.delete();
++                throw new IllegalStateException("Checksum mismatch for " + library.name);
++            }
++            if (!partial.renameTo(target)) {
++                partial.delete();
++                throw new IllegalStateException("Could not store " + library.name);
++            }
++        }
++    }
++
 +    private void prepare(Intent request) throws Throwable {
 +        final String versionId = required(request, EXTRA_VERSION_ID);
 +        final String gameDir = checkedRelative(required(request, EXTRA_GAME_DIR));
@@ -436,6 +497,9 @@ index 0000000..0ecd6fd
 +        JMinecraftVersionList.Version versionInfo = Tools.getVersionInfo(versionId);
 +        if (!NewJREUtil.installNewJreIfNeeded(this, versionInfo))
 +            throw new IllegalStateException("No compatible Java runtime is available for " + versionId);
++
++        setStatus("Checking libraries…");
++        ensureSubstitutedLibraries(versionInfo);
 +
 +        setStatus("Starting Minecraft " + versionId + "…");
 +        ProgressKeeper.waitUntilDone(() -> runOnUiThread(() -> {
