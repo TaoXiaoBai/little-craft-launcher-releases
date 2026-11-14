@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: private-source-android-${{ github.ref }}
@@ -176,6 +177,85 @@ jobs:
             exit 1
           fi
           echo 'Android debug APK built and validated.'
+
+      # The game runtime is the public LGPL component on the android-runtime
+      # branch: a pinned upstream Amethyst commit plus patches. It contains no
+      # private source, so its build output is logged normally. It packages the
+      # Qt application directory prepared above into one APK.
+      - name: Fetch pinned game runtime
+        run: |
+          set -euo pipefail
+          git init -q definition
+          git -C definition fetch -q --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" android-runtime
+          git -C definition checkout -q FETCH_HEAD
+          . definition/UPSTREAM
+          printf '%s' "${UPSTREAM_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'
+          git init -q runtime && cd runtime
+          git fetch -q --depth 1 "${UPSTREAM_REPOSITORY}" "${UPSTREAM_COMMIT}"
+          git checkout -q FETCH_HEAD
+          git submodule update --init --recursive --depth 1
+          git config user.name runtime-build && git config user.email runtime-build@invalid
+          shopt -s nullglob
+          for patch in ../definition/patches/*.patch; do git am -q "${patch}"; done
+          echo "RUNTIME_DEFINITION=$(git -C ../definition rev-parse HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Set up JDK 21 for the runtime
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Get JRE 8 (as upstream CI does)
+        uses: dawidd6/action-download-artifact@07ab29fd4a977ae4d2b275087cf67563dfdf0295 # v9
+        with:
+          workflow: build.yml
+          path: runtime/app_pojavlauncher/src/main/assets/components/jre
+          workflow_conclusion: completed
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre8
+          name: jre8-pojav
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          validate-wrappers: false
+          gradle-version: '9.6.1'
+
+      - name: Build the APK with the game runtime
+        working-directory: runtime
+        run: |
+          set -euo pipefail
+          host="${RUNNER_TEMP}/android-apk/android-build"
+          test -f "${host}/gradle.properties"
+          test -f "${host}/libs/arm64-v8a/libmcl-android_arm64-v8a.so"
+          # One C++ runtime per process: use the newer one the game runtime builds.
+          rm -f "${host}/libs/arm64-v8a/libc++_shared.so"
+          revision="$(git -C ../source rev-parse --short=12 HEAD)"
+          ./scripts/languagelist_updater.sh
+          gradle :app_pojavlauncher:assembleDebug \
+            "-PlclHostDir=${host}" -PlclQtLibName=mcl-android \
+            "-PlclVersionName=0.3.0-preview+${revision}" "-PlclVersionCode=${GITHUB_RUN_NUMBER}"
+          apk=app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk
+          test -f "${apk}"
+          for entry in lib/arm64-v8a/libmcl-android_arm64-v8a.so lib/arm64-v8a/libpojavexec.so \
+                       lib/arm64-v8a/libssl_3.so lib/arm64-v8a/libcrypto_3.so lib/arm64-v8a/libc++_shared.so \
+                       assets/android_rcc_bundle.rcc; do
+            unzip -Z1 "${apk}" | grep -Fx "${entry}" > /dev/null || { echo "::error::The APK is missing ${entry}"; exit 1; }
+          done
+          "${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}/aapt2" dump xmltree "${apk}" --file AndroidManifest.xml > "${RUNNER_TEMP}/manifest.txt"
+          grep -q 'org.qtproject.qt.android.bindings.QtActivity' "${RUNNER_TEMP}/manifest.txt"
+          grep -q 'net.kdt.pojavlaunch.lcl.LclGameEntryActivity' "${RUNNER_TEMP}/manifest.txt"
+          test "$(grep -c 'android.intent.category.LAUNCHER' "${RUNNER_TEMP}/manifest.txt")" = 1
+          # The combined APK replaces the host-only one as the build result.
+          rm -f "${RUNNER_TEMP}"/apk-out/*.apk
+          out="${RUNNER_TEMP}/apk-out/LittleCraft-android-${revision}-arm64-v8a-debug.apk"
+          cp "${apk}" "${out}"
+          {
+            echo '### Android debug APK with game runtime'
+            echo "- Runtime definition (android-runtime branch): \`${RUNTIME_DEFINITION}\`"
+            echo "- Size: $(stat -c %s "${out}") bytes"
+            echo "- SHA-256: \`$(sha256sum "${out}" | cut -d' ' -f1)\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Write safe CI summary (android)
         id: safe-diagnostics

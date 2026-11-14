@@ -172,7 +172,10 @@ class AndroidDiagnosticArtifactTests(unittest.TestCase):
         self.assertIn("path: ${{ runner.temp }}/apk-out/*.apk", apk)
         uploads = [line.strip() for line in WORKFLOW.read_text().splitlines()
                    if line.strip().startswith("path:")]
+        # The runtime path is where the public JRE 8 artifact is downloaded to
+        # (an input of the build), not an upload.
         self.assertEqual(uploads, ["path: builder", "path: source",
+                                  "path: runtime/app_pojavlauncher/src/main/assets/components/jre",
                                   "path: ${{ runner.temp }}/safe-diagnostics/android/summary.json",
                                   "path: ${{ runner.temp }}/diagnostics-android.p7m",
                                   "path: ${{ runner.temp }}/apk-out/*.apk"])
