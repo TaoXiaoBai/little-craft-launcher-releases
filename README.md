@@ -24,6 +24,7 @@ The runtime is [Amethyst](https://github.com/AngelAuraMC/Amethyst-Android)
 git clone --recursive "$UPSTREAM_REPOSITORY" runtime && cd runtime
 git checkout "$UPSTREAM_COMMIT" && git submodule update --init --recursive
 for p in ../patches/*.patch; do [ -e "$p" ] && git am "$p"; done
+./gradlew :app_pojavlauncher:testDebugUnitTest --tests "net.kdt.pojavlaunch.lcl.*"
 ./gradlew :app_pojavlauncher:assembleDebug
 ```
 

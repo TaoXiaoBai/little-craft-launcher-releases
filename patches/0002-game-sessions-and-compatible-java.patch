@@ -1,0 +1,434 @@
+From 8ad8a29c8e9df26e10ba9b6ecf6b8bece171ee9c Mon Sep 17 00:00:00 2001
+From: Tao Xiaobai <1599170798@qq.com>
+Date: Sat, 14 Nov 2026 13:34:25 +0000
+Subject: [PATCH 2/2] Little Craft Launcher: report game sessions to the host
+ and fetch a compatible Java
+
+- LclSession: the runtime's half of the host's session records. The entry
+  activity always ends the hand-over it was given (starting, failed with the
+  reason, or cancelled) and the game process keeps the session lock for its
+  whole life, so the host can protect a running instance across restarts.
+- A Java requirement that is not itself published (16 for Minecraft 1.17)
+  now downloads the lowest published release that runs it instead of failing
+  before any download.
+- Plain JVM tests for both.
+---
+ app_pojavlauncher/build.gradle                |  3 +
+ .../net/kdt/pojavlaunch/MainActivity.java     |  3 +
+ .../java/net/kdt/pojavlaunch/NewJREUtil.java  | 13 ++-
+ .../pojavlaunch/lcl/LclGameEntryActivity.java | 60 ++++++++++++-
+ .../kdt/pojavlaunch/lcl/LclRuntimeChoice.java | 21 +++++
+ .../net/kdt/pojavlaunch/lcl/LclSession.java   | 89 +++++++++++++++++++
+ .../pojavlaunch/lcl/LclRuntimeChoiceTest.java | 37 ++++++++
+ .../kdt/pojavlaunch/lcl/LclSessionTest.java   | 67 ++++++++++++++
+ 8 files changed, 291 insertions(+), 2 deletions(-)
+ create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoice.java
+ create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclSession.java
+ create mode 100644 app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoiceTest.java
+ create mode 100644 app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclSessionTest.java
+
+diff --git a/app_pojavlauncher/build.gradle b/app_pojavlauncher/build.gradle
+index 423e789..9d22b42 100644
+--- a/app_pojavlauncher/build.gradle
++++ b/app_pojavlauncher/build.gradle
+@@ -268,6 +268,9 @@ dependencies {
+ 
+     implementation project(":androidnsbypass")
+ 
++    // Little Craft Launcher: plain JVM tests of the lcl package.
++    testImplementation 'junit:junit:4.13.2'
++
+     // The Qt host application, when this build was given one (-PlclHostDir=...).
+     if (findProject(':lcl_host') != null) {
+         implementation project(':lcl_host')
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/MainActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/MainActivity.java
+index 2cf7b8b..242f22a 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/MainActivity.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/MainActivity.java
+@@ -124,6 +124,9 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
+     @Override
+     public void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
++        // Little Craft Launcher: this is the game process. Keep the session lock
++        // for its whole life so the host knows a game is running.
++        net.kdt.pojavlaunch.lcl.LclGameEntryActivity.onGameProcessStarted(this, getIntent());
+         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+ 
+         minecraftProfile = LauncherProfiles.getCurrentProfile();
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/NewJREUtil.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/NewJREUtil.java
+index 76ca98c..b5d5175 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/NewJREUtil.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/NewJREUtil.java
+@@ -115,7 +115,9 @@ public class NewJREUtil {
+         if (selectedRankedRuntime.value instanceof InternalRuntime)
+             if (!checkInternalRuntime(assetManager, (InternalRuntime) selectedRankedRuntime.value)) {
+                 if (nearestInstalledRuntime == null) // If this was non-null then it would be a valid runtime and we can leave it be
+-                    tryDownloadRuntime(activity, gameRequiredVersion);
++                    // Little Craft Launcher: a requirement such as Java 16 (1.17) is not
++                    // itself published; fetch the lowest published release that runs it.
++                    tryDownloadRuntime(activity, lclDownloadableVersionFor(gameRequiredVersion));
+                 // This means the internal runtime didn't extract so let's use installed instead
+                 // This also refreshes it so after the runtime download, it can find the new runtime
+                 selectedRankedRuntime = getNearestInstalledRuntime(gameRequiredVersion);
+@@ -204,6 +206,15 @@ public class NewJREUtil {
+         }
+     }
+ 
++    private static int lclDownloadableVersionFor(int gameRequiredVersion) {
++        ExternalRuntime[] runtimes = ExternalRuntime.values();
++        int[] published = new int[runtimes.length];
++        for (int i = 0; i < runtimes.length; i++) published[i] = runtimes[i].majorVersion;
++        int version = net.kdt.pojavlaunch.lcl.LclRuntimeChoice.downloadableVersionFor(gameRequiredVersion, published);
++        if (version == -1) throw new RuntimeException("No published Java runtime can run a game that needs Java " + gameRequiredVersion);
++        return version;
++    }
++
+     private enum InternalRuntime {
+         JRE_17(17, "Internal-17", "components/jre-new"),
+         JRE_21(21, "Internal-21", "components/jre-21"),
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+index 0cbb573..e7d93e0 100644
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
+@@ -57,6 +57,11 @@ import java.util.UUID;
+  *   lcl.microsoft     boolean, whether the token is a Microsoft account token
+  *   lcl.xuid          optional Xbox user id
+  *   lcl.java_args     optional extra JVM arguments
++ *   lcl.session_id    the host's session record to report into (LclSession)
++ *
++ * The host protects the instance from the hand-over on. This activity always
++ * ends the session it was given: "starting" when the game process is launched,
++ * otherwise "failed" (with the reason) or "cancelled".
+  */
+ public class LclGameEntryActivity extends AppCompatActivity {
+     public static final String EXTRA_VERSION_ID = "lcl.version_id";
+@@ -70,6 +75,9 @@ public class LclGameEntryActivity extends AppCompatActivity {
+     public static final String EXTRA_JAVA_ARGS = "lcl.java_args";
+     private static final String TAG = "LclGameEntry";
+ 
++    // Whether this activity already told the host how the hand-over ended.
++    private volatile boolean mReported;
++    private String mSessionId;
+     private TextView mStatus;
+     private ProgressBar mProgress;
+     private Button mClose;
+@@ -79,16 +87,59 @@ public class LclGameEntryActivity extends AppCompatActivity {
+         super.onCreate(savedInstanceState);
+         buildLayout();
+         final Intent request = getIntent();
++        mSessionId = request.getStringExtra(LclSession.EXTRA_SESSION_ID);
+         PojavApplication.sExecutorService.execute(() -> {
+             try {
+                 prepare(request);
+             } catch (Throwable throwable) {
+                 Log.e(TAG, "Could not prepare the game", throwable);
++                String reason = throwable.getMessage();
++                report("failed", reason == null || reason.isEmpty() ? throwable.getClass().getSimpleName() : firstLine(reason));
+                 showFailure(throwable);
+             }
+         });
+     }
+ 
++    @Override
++    protected void onDestroy() {
++        // Left before the game process was launched: release the instance.
++        if (isFinishing()) report("cancelled", null);
++        super.onDestroy();
++    }
++
++    private static String firstLine(String text) {
++        int end = text.indexOf('\n');
++        String line = end < 0 ? text : text.substring(0, end);
++        return line.length() > 300 ? line.substring(0, 300) : line;
++    }
++
++    /** Tells the host, once, how this hand-over ended. */
++    private synchronized void report(String state, String message) {
++        if (mReported) return;
++        mReported = true;
++        try {
++            LclSession.write(getFilesDirRoot(this), mSessionId, state, message);
++        } catch (Throwable throwable) {
++            Log.e(TAG, "Could not record the session state " + state, throwable);
++        }
++    }
++
++    private static File getFilesDirRoot(android.content.Context context) {
++        return new File(context.getFilesDir(), "launcher");
++    }
++
++    /** Called by the game process's activity as early as possible. */
++    public static void onGameProcessStarted(android.content.Context context, Intent intent) {
++        String id = intent == null ? null : intent.getStringExtra(LclSession.EXTRA_SESSION_ID);
++        if (id == null) return;
++        try {
++            File root = getFilesDirRoot(context);
++            if (LclSession.holdForProcessLifetime(root, id)) LclSession.write(root, id, "running", null);
++        } catch (Throwable throwable) {
++            Log.e(TAG, "Could not take the game session lock", throwable);
++        }
++    }
++
+     private void buildLayout() {
+         int padding = (int) (24 * getResources().getDisplayMetrics().density);
+         LinearLayout root = new LinearLayout(this);
+@@ -270,10 +321,17 @@ public class LclGameEntryActivity extends AppCompatActivity {
+ 
+         setStatus("Starting Minecraft " + versionId + "…");
+         ProgressKeeper.waitUntilDone(() -> runOnUiThread(() -> {
+-            if (isFinishing() || isDestroyed()) return;
++            if (isFinishing() || isDestroyed()) {
++                report("cancelled", null); // the screen went away before the game could start
++                return;
++            }
+             Intent game = new Intent(this, MainActivity.class);
+             game.putExtra(MainActivity.INTENT_MINECRAFT_VERSION, versionId);
++            if (mSessionId != null) game.putExtra(LclSession.EXTRA_SESSION_ID, mSessionId);
+             game.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
++            // From here the game process owns the session (its lock); until it
++            // has it, the host trusts "starting" for a short grace period.
++            report("starting", null);
+             startActivity(game);
+             finish();
+         }));
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoice.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoice.java
+new file mode 100644
+index 0000000..c5b642c
+--- /dev/null
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoice.java
+@@ -0,0 +1,21 @@
++package net.kdt.pojavlaunch.lcl;
++
++/** Which downloadable Java runtime serves a game's Java requirement. */
++public final class LclRuntimeChoice {
++    private LclRuntimeChoice() {}
++
++    /**
++     * A game asks for a minimum Java major version that may not be published as
++     * a download itself (1.17 asks for 16; only 8, 17, 21 and 25 exist). Any
++     * newer release runs it, so the lowest published version that is not older
++     * than the requirement is the one to fetch.
++     *
++     * @return that version, or -1 when nothing published is new enough
++     */
++    public static int downloadableVersionFor(int required, int[] published) {
++        int best = -1;
++        for (int version : published)
++            if (version >= required && (best == -1 || version < best)) best = version;
++        return best;
++    }
++}
+diff --git a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclSession.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclSession.java
+new file mode 100644
+index 0000000..013942d
+--- /dev/null
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclSession.java
+@@ -0,0 +1,89 @@
++package net.kdt.pojavlaunch.lcl;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.RandomAccessFile;
++import java.nio.channels.FileChannel;
++import java.nio.channels.FileLock;
++import java.nio.charset.StandardCharsets;
++
++/**
++ * The runtime's half of the host launcher's game session records, kept in
++ * "runtime-sessions" below the data root. For a session id (the host's
++ * instance id):
++ *   id.json  the state, replaced atomically. The host writes "handover"; the
++ *            entry activity writes "starting", "failed" or "cancelled"; the
++ *            game process writes "running".
++ *   id.lock  kept exclusively locked by the game process for its whole life.
++ *            The kernel releases it however the process ends, which is how the
++ *            host learns the game is over, also after it was itself restarted.
++ */
++public final class LclSession {
++    public static final String EXTRA_SESSION_ID = "lcl.session_id";
++    public static final String DIRECTORY = "runtime-sessions";
++    // Held until the process dies; never closed on purpose.
++    private static RandomAccessFile sLockFile;
++    private static FileLock sLock;
++
++    private LclSession() {}
++
++    public static boolean validId(String id) {
++        return id != null && id.matches("[A-Za-z0-9][A-Za-z0-9_.+-]{0,199}") && !id.contains("..");
++    }
++
++    static String json(String state, String message, long timeMs) {
++        StringBuilder out = new StringBuilder("{\"state\":\"").append(escape(state)).append("\",\"time\":").append(timeMs);
++        if (message != null) out.append(",\"message\":\"").append(escape(message)).append('"');
++        return out.append('}').toString();
++    }
++
++    private static String escape(String text) {
++        StringBuilder out = new StringBuilder();
++        for (int i = 0; i < text.length(); i++) {
++            char c = text.charAt(i);
++            if (c == '"' || c == '\\') out.append('\\').append(c);
++            else if (c < 0x20) out.append(String.format("\\u%04x", (int) c));
++            else out.append(c);
++        }
++        return out.toString();
++    }
++
++    /** Replaces the state record. Invalid ids and missing directories are ignored. */
++    public static void write(File dataRoot, String id, String state, String message) throws IOException {
++        if (!validId(id)) return;
++        File directory = new File(dataRoot, DIRECTORY);
++        if (!directory.isDirectory()) return; // only the host creates sessions
++        File target = new File(directory, id + ".json");
++        File partial = new File(directory, id + ".json.part");
++        try (FileOutputStream output = new FileOutputStream(partial)) {
++            output.write(json(state, message, System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8));
++            output.getFD().sync();
++        }
++        if (!partial.renameTo(target)) {
++            partial.delete();
++            throw new IOException("Could not publish the session state " + state);
++        }
++    }
++
++    /**
++     * Takes the game lock for the rest of this process's life.
++     * @return whether this process now holds (or already held) the lock
++     */
++    public static synchronized boolean holdForProcessLifetime(File dataRoot, String id) throws IOException {
++        if (sLock != null) return true;
++        if (!validId(id)) return false;
++        File lock = new File(new File(dataRoot, DIRECTORY), id + ".lock");
++        if (!lock.isFile()) return false;
++        RandomAccessFile file = new RandomAccessFile(lock, "rw");
++        FileChannel channel = file.getChannel();
++        FileLock held = channel.tryLock();
++        if (held == null) {
++            file.close();
++            return false;
++        }
++        sLockFile = file;
++        sLock = held;
++        return true;
++    }
++}
+diff --git a/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoiceTest.java b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoiceTest.java
+new file mode 100644
+index 0000000..94aa367
+--- /dev/null
++++ b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclRuntimeChoiceTest.java
+@@ -0,0 +1,37 @@
++package net.kdt.pojavlaunch.lcl;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++public class LclRuntimeChoiceTest {
++    private static final int[] PUBLISHED = {8, 17, 21, 25};
++
++    @Test
++    public void java16GamesGetJava17() {
++        // Minecraft 1.17 and 1.17.1 require Java 16, which is not published.
++        // With only the bundled Java 8 installed this is the download to make.
++        assertEquals(17, LclRuntimeChoice.downloadableVersionFor(16, PUBLISHED));
++    }
++
++    @Test
++    public void exactVersionsAreKept() {
++        assertEquals(8, LclRuntimeChoice.downloadableVersionFor(8, PUBLISHED));
++        assertEquals(17, LclRuntimeChoice.downloadableVersionFor(17, PUBLISHED));
++        assertEquals(21, LclRuntimeChoice.downloadableVersionFor(21, PUBLISHED));
++        assertEquals(25, LclRuntimeChoice.downloadableVersionFor(25, PUBLISHED));
++    }
++
++    @Test
++    public void gapsRoundUpAndTheOrderDoesNotMatter() {
++        assertEquals(17, LclRuntimeChoice.downloadableVersionFor(9, new int[]{25, 21, 17, 8}));
++        assertEquals(25, LclRuntimeChoice.downloadableVersionFor(22, PUBLISHED));
++        assertEquals(8, LclRuntimeChoice.downloadableVersionFor(0, PUBLISHED));
++    }
++
++    @Test
++    public void nothingNewEnough() {
++        assertEquals(-1, LclRuntimeChoice.downloadableVersionFor(26, PUBLISHED));
++        assertEquals(-1, LclRuntimeChoice.downloadableVersionFor(8, new int[]{}));
++    }
++}
+diff --git a/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclSessionTest.java b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclSessionTest.java
+new file mode 100644
+index 0000000..b7a4fec
+--- /dev/null
++++ b/app_pojavlauncher/src/test/java/net/kdt/pojavlaunch/lcl/LclSessionTest.java
+@@ -0,0 +1,67 @@
++package net.kdt.pojavlaunch.lcl;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++
++public class LclSessionTest {
++    @Rule
++    public TemporaryFolder folder = new TemporaryFolder();
++
++    @Test
++    public void idsAreSingleSafeFileNames() {
++        assertTrue(LclSession.validId("survival-1"));
++        assertTrue(LclSession.validId("a.b_c+d"));
++        assertFalse(LclSession.validId(null));
++        assertFalse(LclSession.validId(""));
++        assertFalse(LclSession.validId("../escape"));
++        assertFalse(LclSession.validId("a/b"));
++        assertFalse(LclSession.validId("a..b"));
++        assertFalse(LclSession.validId(".hidden"));
++    }
++
++    @Test
++    public void recordsAreCompactEscapedJson() {
++        assertEquals("{\"state\":\"running\",\"time\":5}", LclSession.json("running", null, 5));
++        assertEquals("{\"state\":\"failed\",\"time\":7,\"message\":\"a \\\"b\\\" \\\\ \\u000ac\"}",
++                LclSession.json("failed", "a \"b\" \\ \nc", 7));
++    }
++
++    @Test
++    public void writesOnlyIntoSessionsTheHostCreated() throws Exception {
++        File root = folder.newFolder("root");
++        // No session directory: the host never asked, nothing is created.
++        LclSession.write(root, "survival-1", "running", null);
++        assertFalse(new File(root, LclSession.DIRECTORY).exists());
++        File directory = new File(root, LclSession.DIRECTORY);
++        assertTrue(directory.mkdirs());
++        LclSession.write(root, "../escape", "running", null);
++        assertEquals(0, directory.list().length);
++        LclSession.write(root, "survival-1", "failed", "no runtime");
++        String text = new String(Files.readAllBytes(new File(directory, "survival-1.json").toPath()), StandardCharsets.UTF_8);
++        assertTrue(text.startsWith("{\"state\":\"failed\",\"time\":"));
++        assertTrue(text.endsWith(",\"message\":\"no runtime\"}"));
++        assertFalse(new File(directory, "survival-1.json.part").exists());
++    }
++
++    @Test
++    public void lockNeedsTheHostsLockFile() throws Exception {
++        File root = folder.newFolder("root");
++        File directory = new File(root, LclSession.DIRECTORY);
++        assertTrue(directory.mkdirs());
++        assertFalse(LclSession.holdForProcessLifetime(root, "survival-1"));
++        assertFalse(LclSession.holdForProcessLifetime(root, "../escape"));
++        assertTrue(new File(directory, "survival-1.lock").createNewFile());
++        assertTrue(LclSession.holdForProcessLifetime(root, "survival-1"));
++        // Idempotent for the life of the process.
++        assertTrue(LclSession.holdForProcessLifetime(root, "survival-1"));
++    }
++}
+-- 
+2.43.0
+
