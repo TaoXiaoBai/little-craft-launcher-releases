@@ -269,6 +269,32 @@ jobs:
           }
           Write-Output 'Both Windows runners passed the complete current test inventory.'
 
+      - name: Record verified Windows release provenance
+        id: windows-provenance
+        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' && steps.windows-verification.outcome == 'success' }}
+        shell: pwsh
+        env:
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python builder/.github/scripts/release_provenance.py create `
+            --proof (Join-Path $env:RUNNER_TEMP 'private-build-logs/windows-combined-proof.json') `
+            --build-dir (Join-Path $env:GITHUB_WORKSPACE 'source/qt-native/build-ci') `
+            --runtime (Join-Path $env:RUNNER_TEMP ('release-assets/LittleCraftLauncher-' + $env:VERSION_TAG + '-windows-x64.zip')) `
+            --platform windows-x64 --tag $env:VERSION_TAG `
+            --output (Join-Path $env:RUNNER_TEMP 'release-provenance/windows.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Release provenance could not be established.' }
+
+      - name: Retain Windows release provenance
+        id: windows-provenance-upload
+        if: ${{ !cancelled() && steps.windows-provenance.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provenance-windows-x64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-provenance/windows.json
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Encrypt private diagnostics
         if: always()
         continue-on-error: true
@@ -296,7 +322,7 @@ jobs:
           retention-days: 3
 
       - name: Retain final runtime package only
-        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' && steps.windows-verification.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' && steps.windows-verification.outcome == 'success' && steps.windows-provenance-upload.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-windows-x64
@@ -306,7 +332,7 @@ jobs:
           compression-level: 0
 
       - name: Retain matching public Qt dependency sources
-        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' && steps.windows-verification.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.windows-package.outcome == 'success' && steps.windows-verification.outcome == 'success' && steps.windows-provenance-upload.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-qt-dependency-sources
@@ -507,6 +533,29 @@ jobs:
           fi
           echo 'Both Linux runners passed the complete current test inventory.'
 
+      - name: Record verified Linux release provenance
+        id: linux-provenance
+        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' }}
+        env:
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          python3 builder/.github/scripts/release_provenance.py create \
+            --proof "$RUNNER_TEMP/private-build-logs/linux-combined-proof.json" \
+            --build-dir "$RUNNER_TEMP/build-linux" \
+            --runtime "$RUNNER_TEMP/release-assets/LittleCraftLauncher-$VERSION_TAG-linux-x86_64.AppImage" \
+            --platform linux-x86_64 --tag "$VERSION_TAG" \
+            --output "$RUNNER_TEMP/release-provenance/linux.json"
+
+      - name: Retain Linux release provenance
+        id: linux-provenance-upload
+        if: ${{ !cancelled() && steps.linux-provenance.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provenance-linux-x86_64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-provenance/linux.json
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Encrypt private diagnostics
         if: always()
         continue-on-error: true
@@ -534,7 +583,7 @@ jobs:
           retention-days: 3
 
       - name: Retain final runtime package only
-        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' && steps.linux-provenance-upload.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-linux-x86_64
@@ -544,7 +593,7 @@ jobs:
           compression-level: 0
 
       - name: Retain verified Qt Wayland source input
-        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.linux-package.outcome == 'success' && steps.linux-verification.outcome == 'success' && steps.linux-provenance-upload.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-qt-wayland-source
@@ -855,6 +904,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION_TAG: ${{ inputs.tag }}
         run: |
+          python3 release-tools/.github/scripts/release_provenance.py verify-runs \
+            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
+            --windows-run-id "$GITHUB_RUN_ID" --linux-run-id "$GITHUB_RUN_ID" --assets release-assets
           python3 release-tools/.github/scripts/publish-prerelease.py \
             --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
             --target "$GITHUB_SHA" --assets release-assets

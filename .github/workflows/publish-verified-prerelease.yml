@@ -1,5 +1,5 @@
 name: Publish verified prerelease packages
-run-name: Publish verified ${{ inputs.tag }}
+run-name: ${{ inputs.verify_only && 'Verify' || 'Publish' }} verified ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -16,6 +16,11 @@ on:
         description: 'Build workflow run with a successful Linux job and matching Qt Wayland source artifact'
         required: true
         type: string
+      verify_only:
+        description: 'Validate provenance and complete packages without creating a release or removing artifacts'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -89,6 +94,10 @@ jobs:
               if len(platform_jobs) != 1 or platform_jobs[0].get('status') != 'completed' or platform_jobs[0].get('conclusion') != 'success':
                   raise RuntimeError('The requested platform build, full tests and package checks did not succeed.')
               artifacts = paginated(f'repos/{repository}/actions/runs/{run_id}/artifacts', 'artifacts')
+              attempt = run.get('run_attempt')
+              if type(attempt) is not int or attempt < 1:
+                  raise RuntimeError('A current build attempt is required.')
+              expected_artifacts = (*expected_artifacts, f'provenance-{platform}-attempt-{attempt}')
               for name in expected_artifacts:
                   matches = [item for item in artifacts if item.get('name') == name and not item.get('expired')]
                   if len(matches) != 1:
@@ -157,13 +166,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION_TAG: ${{ inputs.tag }}
+          WINDOWS_RUN_ID: ${{ inputs.windows_run_id }}
+          LINUX_RUN_ID: ${{ inputs.linux_run_id }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
         run: |
+          python3 release-tools/.github/scripts/release_provenance.py verify-runs \
+            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
+            --windows-run-id "$WINDOWS_RUN_ID" --linux-run-id "$LINUX_RUN_ID" --assets release-assets
+          arguments=()
+          if [[ "$VERIFY_ONLY" == 'true' ]]; then arguments+=(--verify-only); fi
           python3 release-tools/.github/scripts/publish-prerelease.py \
             --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" \
-            --target "$GITHUB_SHA" --assets release-assets
+            --target "$GITHUB_SHA" --assets release-assets "${arguments[@]}"
 
       - name: Remove temporary packages after verifying the published prerelease
-        if: success()
+        if: success() && !inputs.verify_only
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
