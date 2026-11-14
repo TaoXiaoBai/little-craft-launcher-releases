@@ -1,4 +1,4 @@
-From 9d2a4cc6241fed55864fa427a14e38ec6f766027 Mon Sep 17 00:00:00 2001
+From 16875a955917f3fa2077f85ecadfe5c8fa8233aa Mon Sep 17 00:00:00 2001
 From: Tao Xiaobai <1599170798@qq.com>
 Date: Sat, 14 Nov 2026 10:23:42 +0000
 Subject: [PATCH] Little Craft Launcher: package with a Qt host and enter
@@ -13,20 +13,20 @@ Subject: [PATCH] Little Craft Launcher: package with a Qt host and enter
 - LclGameEntryActivity turns a host launch request into the runtime's profile
   and account records, ensures a Java runtime and starts MainActivity.
 ---
- app_pojavlauncher/build.gradle                |  48 ++--
+ app_pojavlauncher/build.gradle                |  50 ++--
  .../src/main/AndroidManifest.xml              |  17 +-
  .../main/java/net/kdt/pojavlaunch/Tools.java  |  20 +-
  .../pojavlaunch/lcl/LclGameEntryActivity.java | 217 ++++++++++++++++++
  lcl_host/build.gradle                         |  49 ++++
  lcl_host/src/main/AndroidManifest.xml         |  30 +++
  settings.gradle                               |   6 +
- 7 files changed, 354 insertions(+), 33 deletions(-)
+ 7 files changed, 356 insertions(+), 33 deletions(-)
  create mode 100644 app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/lcl/LclGameEntryActivity.java
  create mode 100644 lcl_host/build.gradle
  create mode 100644 lcl_host/src/main/AndroidManifest.xml
 
 diff --git a/app_pojavlauncher/build.gradle b/app_pojavlauncher/build.gradle
-index 11a696b..c2e0c3d 100644
+index 11a696b..423e789 100644
 --- a/app_pojavlauncher/build.gradle
 +++ b/app_pojavlauncher/build.gradle
 @@ -65,6 +65,10 @@ def getCFApiKey = {
@@ -60,7 +60,7 @@ index 11a696b..c2e0c3d 100644
          multiDexEnabled true //important
          resValue 'string', 'curseforge_api_key', getCFApiKey()
          externalNativeBuild {
-@@ -117,16 +125,15 @@ android {
+@@ -117,25 +125,26 @@ android {
  
      buildTypes {
          debug {
@@ -82,7 +82,18 @@ index 11a696b..c2e0c3d 100644
          }
          proguard {
              initWith debug
-@@ -146,10 +153,11 @@ android {
+             minifyEnabled true
+             shrinkResources true
++            matchingFallbacks = [ 'debug' ]
+         }
+         proguardNoDebug {
+             initWith proguard
+             debuggable false
++            matchingFallbacks = [ 'release' ]
+         }
+ 
+         release {
+@@ -146,10 +155,11 @@ android {
              // defaultConfig already set
              // multiDexEnabled = true
              // debuggable = true
@@ -98,7 +109,7 @@ index 11a696b..c2e0c3d 100644
          }
          gplay {
              initWith release
-@@ -183,7 +191,7 @@ android {
+@@ -183,7 +193,7 @@ android {
              // If you're debugging mesa libs, put them here, android will strip them
              // and not properly link to source files, very smart android studio.
              keepDebugSymbols += ['**/libcutils.so']
@@ -107,7 +118,7 @@ index 11a696b..c2e0c3d 100644
          }
      }
  
-@@ -195,6 +203,11 @@ android {
+@@ -195,6 +205,11 @@ android {
      lint {
          abortOnError false
      }
@@ -119,7 +130,7 @@ index 11a696b..c2e0c3d 100644
  }
  
  afterEvaluate {
-@@ -253,5 +266,10 @@ dependencies {
+@@ -253,5 +268,10 @@ dependencies {
  
      implementation project(":androidnsbypass")
  
