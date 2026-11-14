@@ -42,6 +42,29 @@ def dependency_archives(tag):
     }
 
 
+def _compact_release_notes(repository, tag, hashes, changes):
+    windows, linux = runtime_names(tag)
+    base = f"https://github.com/{repository}"
+    intro = (changes or "预发布版本，欢迎反馈使用中遇到的问题。").strip()
+    lines = [intro, "",
+             f"[Windows ZIP]({base}/releases/download/{tag}/{windows}) · "
+             f"[Linux AppImage]({base}/releases/download/{tag}/{linux}) · "
+             f"[使用说明]({base}#readme) · [反馈]({base}/issues)", "",
+             "<details>", "<summary>安装提示、校验与许可</summary>", "",
+             "- Windows 10/11 x64：解压后运行 `mclauncher-qt.exe`，依赖已内置。程序尚未签名，可能出现 SmartScreen 提示。",
+             "- Linux x86_64（Ubuntu 22.04+）：添加执行权限后运行 AppImage，支持 X11 / Wayland；保存在线凭据需要系统密钥环（Secret Service）。", "",
+             "### SHA-256", "", "| 文件 | SHA-256 |", "| --- | --- |"]
+    lines += [f"| {name} | `{hashes[name]}` |" for name in (windows, linux)]
+    lines += ["", "### 依赖与许可", "",
+              "Windows 可用 `mclauncher-qt.exe --extract-runtime <新目录>` 提取运行时及 `SUPPORTING_MATERIALS.zip`，查看许可和 Qt 动态库替换方法；Linux 包内保留相同材料。", "",
+              "Qt 6.8.3 对应官方源码（使用启动器无需下载）：", "",
+              "| Qt 依赖源码 | SHA-256 |", "| --- | --- |"]
+    lines += [f"| [{name}]({QT_SOURCE_BASE_URL}{name}) | `{digest}` |"
+              for name, (_, digest) in dependency_archives(tag).items()]
+    lines += ["", "启动器源码暂未公开；GitHub 自动生成的 `Source code` 仅包含公开介绍与发布工具。", "", "</details>", ""]
+    return "\n".join(lines)
+
+
 def release_notes(repository, tag, hashes, changes=None):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Invalid release repository")
@@ -53,6 +76,9 @@ def release_notes(repository, tag, hashes, changes=None):
     legacy = tag in LEGACY_LINUX_TAGS
     version, phase, sequence = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)-(pre|alpha|beta|rc)\.([0-9]+)", tag).groups()
     version = tuple(int(part) for part in version.split("."))
+    # Keep published pre.1–pre.13 notes reproducible for their existing checks.
+    if version > (1, 0, 0) or (version == (1, 0, 0) and (phase != "pre" or int(sequence) >= 14)):
+        return _compact_release_notes(repository, tag, hashes, changes)
     # Historical pre.1–pre.8 notes retain their original configuration status.
     configured_microsoft = version > (1, 0, 0) or (
         version == (1, 0, 0) and (phase != "pre" or int(sequence) >= 9))

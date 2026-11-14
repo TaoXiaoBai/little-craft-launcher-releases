@@ -414,8 +414,8 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn(SUPPORT.QT_SOURCE_BASE_URL, primary)
         self.assertEqual(len(SUPPORT.runtime_names(tag)), 2)
 
-    def test_pre9_and_later_describe_configured_microsoft_login_without_claiming_approval(self):
-        for tag in ("v1.0.0-pre.9", "v1.0.0-pre.10", "v1.0.0-rc.1", "v1.0.1-pre.1"):
+    def test_published_configured_releases_keep_their_microsoft_wording(self):
+        for tag in ("v1.0.0-pre.9", "v1.0.0-pre.10", "v1.0.0-pre.13"):
             with self.subTest(tag=tag):
                 names = SUPPORT.runtime_names(tag)
                 hashes = dict(zip(names, ("a" * 64, "b" * 64)))
@@ -429,6 +429,36 @@ class ReleaseNotesTests(unittest.TestCase):
                     self.assertIn(f"| {name} | `{checksum}` |", body)
                 for name in SUPPORT.dependency_archives(tag):
                     self.assertIn(f"({SUPPORT.QT_SOURCE_BASE_URL}{name})", body)
+
+    def test_compact_notes_preserve_publication_and_cleanup_evidence(self):
+        changes = "- 显示所选角色的皮肤头像。\n- 改进头像缓存与切换。"
+        for tag in ("v1.0.0-pre.14", "v1.0.0-pre.100", "v1.0.0-rc.1", "v1.0.1-pre.1", "v2.0.0-alpha.1"):
+            with self.subTest(tag=tag):
+                names = SUPPORT.runtime_names(tag)
+                hashes = dict(zip(names, ("a" * 64, "b" * 64)))
+                body = SUPPORT.release_notes(REPOSITORY, tag, hashes, changes)
+                primary, details = body.split("<details>", 1)
+                self.assertTrue(primary.startswith(changes + "\n\n"))
+                self.assertEqual(body.count("<details>"), 1)
+                self.assertEqual(body.count("</details>"), 1)
+                self.assertNotIn("## 使用说明", primary)
+                self.assertNotIn("SmartScreen", primary)
+                self.assertNotIn("Mojang 服务准入及实际登录结果仍待确认", body)
+                self.assertIn("SmartScreen", details)
+                self.assertIn("Secret Service", details)
+                self.assertIn("--extract-runtime <新目录>", details)
+                self.assertIn("SUPPORTING_MATERIALS.zip", details)
+                for name, digest in hashes.items():
+                    self.assertIn(f"/releases/download/{tag}/{name}", primary)
+                    self.assertNotIn(digest, primary)
+                assets = [{"name": name, "size": 100, "state": "uploaded", "digest": "sha256:" + digest}
+                          for name, digest in hashes.items()]
+                SUPPORT.verify_published_assets(tag, assets, body)
+                with self.assertRaises(ValueError):
+                    SUPPORT.verify_published_assets(tag, assets, body.replace("`" + hashes[names[0]] + "`", ""))
+                qt_name = next(iter(SUPPORT.dependency_archives(tag)))
+                with self.assertRaises(ValueError):
+                    SUPPORT.verify_published_assets(tag, assets, body.replace(SUPPORT.QT_SOURCE_BASE_URL + qt_name, ""))
 
     def test_pre7_and_pre8_keep_their_historical_microsoft_wording(self):
         for tag in ("v1.0.0-pre.7", "v1.0.0-pre.8"):
