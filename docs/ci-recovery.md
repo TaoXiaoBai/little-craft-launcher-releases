@@ -6,7 +6,7 @@
 
 启动器源码位于维护者授权的私有源码仓库；本仓库仅保存公开介绍与构建工具。公开构建仓库是 [TaoXiaoBai/little-craft-launcher-releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases)，通过 Actions Secrets 中的 `SOURCE_REPOSITORY` 和 `SOURCE_READ_TOKEN` 读取源码。接手者使用自己已授权的仓库连接，不需要读取或索取这些 Secret 的值。
 
-读取摘要需要公开仓库的 Actions 读权限，派发需要 Actions 写权限，发布还需要 Contents 写权限；读取私有源码是另一个仓库的授权。遇到 401/403 时核对已有连接与具体缺失权限，让维护者授权连接，不让用户把令牌发到聊天里。
+读取摘要需要公开仓库的 Actions 读权限，派发需要 Actions 写权限，发布还需要 Contents 写权限；读取私有源码是另一个仓库的授权。推送 `.github/workflows/*.yml` 的修复还需连接具备 Workflows 写权限（使用 classic PAT 时对应 `workflow` scope）。遇到 401/403 时核对已有连接与具体缺失权限，让维护者授权连接，不让用户把令牌发到聊天里。
 
 所有下列工作流都从公开仓库的默认分支 `main` 手动派发：
 
@@ -50,7 +50,7 @@ python3 "$public_checkout/.github/scripts/ci_triage.py" \
 
 摘要包含 run/attempt、源码提交、受控错误类别、已公开的失败测试组、源码文件指纹及行列号。它不包含原始路径、源码、断言内容、测试数据行、用户名、令牌或原始日志。工具在私有 checkout 的对应 Git tree 中匹配文件指纹，通过 `git show` 只在本地显示实际文件与代码位置。
 
-`summary.status` 是生成摘要时的快照；之后加密或上传产物仍可能失败。远程命令会另外返回 `outcomes`，显示所选 attempt 的 run、对应 job 的最新 API 状态与结论，以及失败的公开步骤名。判断 CI 结果先看这些状态，`in_progress` 不能算通过，也不能拿摘要里的 `passed` 覆盖后续失败。明确指定历史 `--attempt N` 时，显示该次 attempt 的结果；离线 `--summary-file` 没有核验最终状态，`outcomes` 为 `null`。`--safe-only` 同样会显示公开状态信息，但不输出私有文件路径或源码。
+`summary.status` 是生成摘要时的快照；之后加密或上传产物仍可能失败。远程命令会另外返回 `outcomes`，显示所选 attempt 的 run、对应 job 的最新 API 状态与结论，以及失败的公开步骤名。命令退出码 0 只表示诊断读取成功，不表示 CI 通过；判断 CI 结果先看 `outcomes`，`in_progress` 不能算通过，也不能拿摘要里的 `passed` 覆盖后续失败。明确指定历史 `--attempt N` 时，显示该次 attempt 的结果；离线 `--summary-file` 没有核验最终状态，`outcomes` 为 `null`。`--safe-only` 同样会显示公开状态信息，但不输出私有文件路径或源码。
 
 若源码提交尚未在本地，按工具提示从已经授权的私有 remote 获取该提交，然后建立隔离 worktree。不要把失败 run 的行号直接套到另一个提交：
 
