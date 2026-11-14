@@ -232,6 +232,8 @@ jobs:
           rm -f "${host}/libs/arm64-v8a/libc++_shared.so"
           revision="$(git -C ../source rev-parse --short=12 HEAD)"
           ./scripts/languagelist_updater.sh
+          # Plain JVM tests of the Little Craft Launcher part of the runtime.
+          gradle :app_pojavlauncher:testDebugUnitTest --tests 'net.kdt.pojavlaunch.lcl.*'
           gradle :app_pojavlauncher:assembleDebug \
             "-PlclHostDir=${host}" -PlclQtLibName=mcl-android \
             "-PlclVersionName=0.3.0-preview+${revision}" "-PlclVersionCode=${GITHUB_RUN_NUMBER}"

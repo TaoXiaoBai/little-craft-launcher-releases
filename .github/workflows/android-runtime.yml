@@ -76,6 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/languagelist_updater.sh
+          # Plain JVM tests of the Little Craft Launcher part of the runtime.
+          gradle :app_pojavlauncher:testDebugUnitTest --tests 'net.kdt.pojavlaunch.lcl.*'
           gradle :app_pojavlauncher:assembleDebug
           apk=app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk
           test -f "${apk}"
