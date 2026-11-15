@@ -178,7 +178,11 @@ class AndroidDiagnosticArtifactTests(unittest.TestCase):
                                   "path: runtime/app_pojavlauncher/src/main/assets/components/jre",
                                   "path: ${{ runner.temp }}/safe-diagnostics/android/summary.json",
                                   "path: ${{ runner.temp }}/diagnostics-android.p7m",
+                                  "path: ${{ runner.temp }}/release-out/*",
                                   "path: ${{ runner.temp }}/apk-out/*.apk"])
+        release = "\n".join(step("Upload signed release package"))
+        self.assertIn("if: success() && inputs.upload_apk && steps.runtime.outputs.signed == 'true'", release)
+        self.assertIn("if: success() && inputs.upload_apk && !inputs.release_tag", apk)
 
 
 class WindowsDiagnosticArtifactTests(unittest.TestCase):

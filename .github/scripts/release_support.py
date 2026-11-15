@@ -24,6 +24,53 @@ def runtime_names(tag):
             f"LittleCraftLauncher-{tag}-linux-x86_64.{suffix}")
 
 
+ANDROID_RUNTIME_UPSTREAM = "https://github.com/AngelAuraMC/Amethyst-Android"
+_ANDROID_PHASES = {"alpha": 1, "beta": 2, "pre": 3, "rc": 4}
+
+
+def android_name(tag):
+    """The optional third download; the two desktop packages stay mandatory."""
+    runtime_names(tag)
+    return f"LittleCraftLauncher-{tag}-android-arm64-v8a.apk"
+
+
+def android_version(tag):
+    """Version name and an Android version code that grows with every release."""
+    runtime_names(tag)
+    version, phase, sequence = re.fullmatch(
+        r"v([0-9]+\.[0-9]+\.[0-9]+)-(pre|alpha|beta|rc)\.([0-9]+)", tag).groups()
+    major, minor, patch = (int(part) for part in version.split("."))
+    sequence = int(sequence)
+    # Two digits each for minor and patch, one for the phase and three for its
+    # sequence; nine is left above "rc" for a later final release.
+    if major > 20 or minor > 99 or patch > 99 or sequence > 999:
+        raise ValueError("The version does not fit an Android version code")
+    code = ((major * 100 + minor) * 100 + patch) * 10000 + _ANDROID_PHASES[phase] * 1000 + sequence
+    return tag[1:], code
+
+
+def android_notes(repository, tag, digest, certificate, definition):
+    """Release-note section added when the signed Android package is attached."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("Invalid release repository")
+    if (not re.fullmatch(r"[0-9a-f]{64}", digest) or not re.fullmatch(r"[0-9a-f]{64}", certificate)
+            or not re.fullmatch(r"[0-9a-f]{40}", definition)):
+        raise ValueError("Android package identity is incomplete")
+    name = android_name(tag)
+    base = f"https://github.com/{repository}"
+    return "\n".join([
+        "", "### Android（预览）", "",
+        f"[Android APK]({base}/releases/download/{tag}/{name}) · Android 10 及以上的 arm64-v8a 设备。", "",
+        "- 预览版本，尚未经过充分的真机测试：目前提供离线账号下原版游戏的安装与启动；Microsoft 登录、模组加载器和整合包暂未提供。",
+        "- 部分游戏版本首次启动时需要联网下载对应的 Java 运行环境。",
+        "- 安装包使用项目签名，后续版本可直接覆盖安装。", "",
+        "| 文件 | SHA-256 |", "| --- | --- |",
+        f"| {name} | `{digest}` |", "",
+        f"签名证书 SHA-256：`{certificate}`", "",
+        f"游戏运行部分基于 [Amethyst]({ANDROID_RUNTIME_UPSTREAM})（LGPL-3.0），与启动器本体相互独立。"
+        f"本版本所用的完整对应源码与全部修改见 [android-runtime 分支]({base}/tree/{definition})。", ""])
+
+
 def windows_bundle_required(tag):
     """Keep released pre.1–pre.9 dynamic ZIPs frozen; require one EXE later."""
     runtime_names(tag)
@@ -129,11 +176,17 @@ def release_notes(repository, tag, hashes, changes=None):
     return "\n".join(lines)
 
 
-def verify_published_assets(tag, assets, body):
-    """Refuse cleanup until both runtime uploads and source directions exist."""
+def verify_published_assets(tag, assets, body, allow_android=False):
+    """Refuse cleanup until both runtime uploads and source directions exist.
+
+    The signed Android package is attached after publication; only callers
+    that run later accept it, and then with its published checksum as well.
+    """
     expected = set(runtime_names(tag))
-    if (len(assets) != 2 or {item.get("name") for item in assets} != expected
-            or not isinstance(body, str)):
+    names = [item.get("name") for item in assets]
+    allowed = expected | ({android_name(tag)} if allow_android else set())
+    if (any(not isinstance(name, str) for name in names) or len(names) != len(set(names))
+            or not expected <= set(names) <= allowed or not isinstance(body, str)):
         raise ValueError("A release must contain exactly the two runtime packages")
     for item in assets:
         digest = item.get("digest", "")

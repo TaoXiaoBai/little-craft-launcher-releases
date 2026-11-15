@@ -70,7 +70,8 @@ def prune(repository, tag, run_ids, api=github_api, dry_run=False):
         raise ValueError("A public prerelease is required")
     release_id = positive_id(release.get("id"))
     assets = paginated(api, f"{prefix}/releases/{release_id}/assets")
-    verify_published_assets(tag, assets, release.get("body", ""))
+    # The signed Android package may have been attached after publication.
+    verify_published_assets(tag, assets, release.get("body", ""), allow_android=True)
     artifact_platforms = dict(ARTIFACT_PLATFORMS)
     if tag in LEGACY_LINUX_TAGS:
         # The frozen TAR release never owned a Wayland dependency artifact.

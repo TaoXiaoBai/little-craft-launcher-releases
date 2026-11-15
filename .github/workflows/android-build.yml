@@ -5,6 +5,16 @@
 # Logs and artifacts of a public repo are public. The APK is uploaded only when
 # upload_apk is selected; private build/test output is retained only as encrypted
 # diagnostics, never as plaintext artifacts or public step output.
+#
+# With release_tag the same job builds the release variant under that version.
+# The prerelease workflow calls it that way and attaches the result to the
+# release when it is signed with the project's own key, held in the secrets:
+#   ANDROID_KEYSTORE_BASE64: base64 of the keystore file
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD: optional, when it differs from the keystore password
+# Without them the release variant is still built and checked, but it stays
+# unsigned and is neither uploaded nor published: a package signed with a
+# public debug key could be replaced by anyone and could not be updated later.
 name: Android build
 run-name: Build Android client ${{ inputs.source_ref || 'master' }}
 
@@ -21,13 +31,44 @@ on:
         type: boolean
         required: false
         default: false
+      release_tag:
+        description: 'Rehearse a release build under this version, e.g. v1.0.0-pre.16 (publishes nothing)'
+        type: string
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      source_ref:
+        description: 'Full private-source commit SHA'
+        type: string
+        required: false
+        default: ''
+      source_tag:
+        description: 'Private-source tag, used when no commit is given'
+        type: string
+        required: false
+        default: ''
+      release_tag:
+        description: 'Version to build the release variant for'
+        type: string
+        required: false
+        default: ''
+      upload_apk:
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      signed:
+        description: 'true when a signed release package was uploaded'
+        value: ${{ jobs.build.outputs.signed }}
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: private-source-android-${{ github.ref }}
+  # A release build must not be cancelled by, or cancel, a manual build.
+  group: private-source-android-${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -46,6 +87,8 @@ jobs:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    outputs:
+      signed: ${{ steps.runtime.outputs.signed }}
     steps:
       - name: Checkout public diagnostic tools
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -58,6 +101,8 @@ jobs:
           SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
           SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           if [ -z "${SOURCE_REPOSITORY}" ] || [ -z "${SOURCE_READ_TOKEN}" ]; then
@@ -68,6 +113,23 @@ jobs:
           fi
           if [ -n "${SOURCE_REF}" ] && ! printf '%s' "${SOURCE_REF}" | grep -Eq '^[0-9a-f]{40}$'; then
             echo '::error::source_ref must be a full 40-character commit SHA.'; exit 1
+          fi
+          if [ -n "${SOURCE_TAG}" ] && [ "${SOURCE_TAG}" != "${RELEASE_TAG}" ]; then
+            echo '::error::source_tag may only name the release being built.'; exit 1
+          fi
+          if [ -n "${RELEASE_TAG}" ]; then
+            # Also validates the version; prints "<package> <version name> <version code>".
+            if ! identity="$(python3 builder/.github/scripts/android_release.py version --tag "${RELEASE_TAG}")"; then
+              echo '::error::release_tag must be a prerelease version such as v1.0.0-pre.16.'; exit 1
+            fi
+            read -r package version_name version_code <<<"${identity}"
+            {
+              echo 'BUILD_VARIANT=release'
+              echo "RELEASE_TAG=${RELEASE_TAG}"
+              echo "RELEASE_PACKAGE=${package}"
+              echo "RELEASE_VERSION_NAME=${version_name}"
+              echo "RELEASE_VERSION_CODE=${version_code}"
+            } >> "${GITHUB_ENV}"
           fi
           # GitHub masks the complete secret; also mask its parts and casing.
           lower="$(printf '%s' "${SOURCE_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
@@ -80,7 +142,7 @@ jobs:
         with:
           repository: ${{ secrets.SOURCE_REPOSITORY }}
           token: ${{ secrets.SOURCE_READ_TOKEN }}
-          ref: ${{ inputs.source_ref || 'master' }}
+          ref: ${{ inputs.source_ref || inputs.source_tag || 'master' }}
           path: source
           fetch-depth: 1
           persist-credentials: false
@@ -146,6 +208,14 @@ jobs:
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/private-build-logs"
           if ! bash -euo pipefail > "${RUNNER_TEMP}/private-build-logs/android-apk.log" 2>&1 <<'APK'
+            # A release uses optimized native code; that host package is unsigned.
+            build_type=Debug
+            pattern='*debug*'
+            if [ "${BUILD_VARIANT:-debug}" = release ] \
+                && grep -q -- '--build-type' source/qt-native/scripts/build-android-preview.py; then
+              build_type=Release
+              pattern='*'
+            fi
             python3 source/qt-native/scripts/build-android-preview.py --build \
               --build-dir "${RUNNER_TEMP}/android-apk" \
               --qt "${RUNNER_TEMP}/Qt/${QT_VERSION}/android_arm64_v8a" \
@@ -153,9 +223,10 @@ jobs:
               --sdk "${ANDROID_SDK_ROOT}" \
               --ndk "${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" \
               --jdk "${JAVA_HOME_17_X64}" \
-              --openssl "${RUNNER_TEMP}/android_openssl"
-            apk="$(find "${RUNNER_TEMP}/android-apk" -name '*.apk' -path '*debug*' | head -n 1)"
-            if [ -z "${apk}" ]; then echo 'No debug APK was produced.'; exit 1; fi
+              --openssl "${RUNNER_TEMP}/android_openssl" \
+              $([ "${build_type}" = Release ] && echo '--build-type Release')
+            apk="$(find "${RUNNER_TEMP}/android-apk" -name '*.apk' -path "${pattern}" | head -n 1)"
+            if [ -z "${apk}" ]; then echo 'No host APK was produced.'; exit 1; fi
             mkdir -p "${RUNNER_TEMP}/apk-out"
             revision="$(git -C source rev-parse --short=12 HEAD)"
             out="${RUNNER_TEMP}/apk-out/LittleCraft-android-${revision}-arm64-v8a-debug.apk"
@@ -222,10 +293,18 @@ jobs:
           gradle-version: '9.6.1'
 
       - name: Build the APK with the game runtime
+        id: runtime
         working-directory: runtime
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          echo 'signed=false' >> "${GITHUB_OUTPUT}"
           host="${RUNNER_TEMP}/android-apk/android-build"
+          tools="${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}"
           test -f "${host}/gradle.properties"
           test -f "${host}/libs/arm64-v8a/libmcl-android_arm64-v8a.so"
           # One C++ runtime per process: use the newer one the game runtime builds.
@@ -234,30 +313,88 @@ jobs:
           ./scripts/languagelist_updater.sh
           # Plain JVM tests of the Little Craft Launcher part of the runtime.
           gradle :app_pojavlauncher:testDebugUnitTest --tests 'net.kdt.pojavlaunch.lcl.*'
-          gradle :app_pojavlauncher:assembleDebug \
-            "-PlclHostDir=${host}" -PlclQtLibName=mcl-android \
-            "-PlclVersionName=0.3.0-preview+${revision}" "-PlclVersionCode=${GITHUB_RUN_NUMBER}"
-          apk=app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk
+          if [ "${BUILD_VARIANT:-debug}" = release ]; then
+            # Unsigned here; signed below with the project's own key only.
+            gradle :app_pojavlauncher:assembleRelease -PlclUnsigned \
+              "-PlclHostDir=${host}" -PlclQtLibName=mcl-android \
+              "-PlclVersionName=${RELEASE_VERSION_NAME}" "-PlclVersionCode=${RELEASE_VERSION_CODE}"
+            apk=app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release-unsigned.apk
+          else
+            gradle :app_pojavlauncher:assembleDebug \
+              "-PlclHostDir=${host}" -PlclQtLibName=mcl-android \
+              "-PlclVersionName=0.3.0-preview+${revision}" "-PlclVersionCode=${GITHUB_RUN_NUMBER}"
+            apk=app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk
+          fi
           test -f "${apk}"
           for entry in lib/arm64-v8a/libmcl-android_arm64-v8a.so lib/arm64-v8a/libpojavexec.so \
                        lib/arm64-v8a/libssl_3.so lib/arm64-v8a/libcrypto_3.so lib/arm64-v8a/libc++_shared.so \
                        assets/android_rcc_bundle.rcc; do
             unzip -Z1 "${apk}" | grep -Fx "${entry}" > /dev/null || { echo "::error::The APK is missing ${entry}"; exit 1; }
           done
-          "${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}/aapt2" dump xmltree "${apk}" --file AndroidManifest.xml > "${RUNNER_TEMP}/manifest.txt"
+          "${tools}/aapt2" dump xmltree "${apk}" --file AndroidManifest.xml > "${RUNNER_TEMP}/manifest.txt"
           grep -q 'org.qtproject.qt.android.bindings.QtActivity' "${RUNNER_TEMP}/manifest.txt"
           grep -q 'net.kdt.pojavlaunch.lcl.LclGameEntryActivity' "${RUNNER_TEMP}/manifest.txt"
           test "$(grep -c 'android.intent.category.LAUNCHER' "${RUNNER_TEMP}/manifest.txt")" = 1
           # The combined APK replaces the host-only one as the build result.
           rm -f "${RUNNER_TEMP}"/apk-out/*.apk
-          out="${RUNNER_TEMP}/apk-out/LittleCraft-android-${revision}-arm64-v8a-debug.apk"
-          cp "${apk}" "${out}"
+          if [ "${BUILD_VARIANT:-debug}" != release ]; then
+            out="${RUNNER_TEMP}/apk-out/LittleCraft-android-${revision}-arm64-v8a-debug.apk"
+            cp "${apk}" "${out}"
+            {
+              echo '### Android debug APK with game runtime'
+              echo "- Runtime definition (android-runtime branch): \`${RUNTIME_DEFINITION}\`"
+              echo "- Size: $(stat -c %s "${out}") bytes"
+              echo "- SHA-256: \`$(sha256sum "${out}" | cut -d' ' -f1)\`"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          # A published package must carry its version and must not be debuggable.
+          "${tools}/aapt2" dump badging "${apk}" > "${RUNNER_TEMP}/badging.txt"
+          grep -q "^package: name='org.littlecraftlauncher.android' versionCode='${RELEASE_VERSION_CODE}' versionName='${RELEASE_VERSION_NAME}'" "${RUNNER_TEMP}/badging.txt"
+          if grep -q '^application-debuggable' "${RUNNER_TEMP}/badging.txt"; then
+            echo '::error::The release package is debuggable.'; exit 1
+          fi
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${ANDROID_KEY_ALIAS}" ]; then
+            echo '::notice::The Android release package was built and checked but is not published: the signing secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS are not configured.'
+            {
+              echo '### Android release package (unsigned, not published)'
+              echo "- Version: \`${RELEASE_VERSION_NAME}\` (code ${RELEASE_VERSION_CODE})"
+              echo '- Configure the Android signing secrets to publish it with the next release.'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          umask 077
+          keys="$(mktemp -d "${RUNNER_TEMP}/signing.XXXXXX")"
+          trap 'rm -rf "${keys}"' EXIT
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode --ignore-garbage > "${keys}/release.keystore"
+          export ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-${ANDROID_KEYSTORE_PASSWORD}}"
+          mkdir -p "${RUNNER_TEMP}/release-out"
+          out="${RUNNER_TEMP}/release-out/${RELEASE_PACKAGE}"
+          # Tool output is discarded so that nothing about the key reaches the log.
+          if ! "${tools}/apksigner" sign --ks "${keys}/release.keystore" --ks-key-alias "${ANDROID_KEY_ALIAS}" \
+              --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+              --out "${out}" "${apk}" > /dev/null 2>&1; then
+            echo '::error::Signing failed. Check the keystore, alias and passwords in the Android signing secrets.'; exit 1
+          fi
+          rm -f "${out}.idsig"
+          "${tools}/apksigner" verify --min-sdk-version 29 --print-certs "${out}" > "${keys}/certificate.txt"
+          if grep -qi 'CN=Android Debug' "${keys}/certificate.txt"; then
+            echo '::error::The configured key is an Android debug key; a release needs its own key.'; exit 1
+          fi
+          test "$(grep -c '^Signer #[0-9]* certificate SHA-256 digest:' "${keys}/certificate.txt")" = 1
+          certificate="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "${keys}/certificate.txt")"
+          python3 ../builder/.github/scripts/android_release.py describe --tag "${RELEASE_TAG}" \
+            --apk "${out}" --certificate "${certificate}" --runtime-definition "${RUNTIME_DEFINITION}"
           {
-            echo '### Android debug APK with game runtime'
+            echo '### Android release package (signed)'
+            echo "- Version: \`${RELEASE_VERSION_NAME}\` (code ${RELEASE_VERSION_CODE})"
             echo "- Runtime definition (android-runtime branch): \`${RUNTIME_DEFINITION}\`"
             echo "- Size: $(stat -c %s "${out}") bytes"
             echo "- SHA-256: \`$(sha256sum "${out}" | cut -d' ' -f1)\`"
+            echo "- Signing certificate SHA-256: \`${certificate}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
+          echo 'signed=true' >> "${GITHUB_OUTPUT}"
 
       - name: Write safe CI summary (android)
         id: safe-diagnostics
@@ -304,8 +441,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      # Not named release-*: the desktop publication collects those artifacts
+      # and must keep seeing exactly its own two packages.
+      - name: Upload signed release package
+        if: success() && inputs.upload_apk && steps.runtime.outputs.signed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-package-${{ inputs.release_tag }}
+          path: ${{ runner.temp }}/release-out/*
+          retention-days: 3
+          if-no-files-found: error
+
       - name: Upload debug APK
-        if: success() && inputs.upload_apk
+        if: success() && inputs.upload_apk && !inputs.release_tag
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: little-craft-android-debug-${{ github.run_id }}
