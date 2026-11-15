@@ -82,7 +82,7 @@ These are real Qt development windows captured on Linux with software rendering 
 
 The Microsoft sign-in implementation opens the system browser and uses the OAuth authorization-code flow with S256 PKCE and a local loopback callback. It then uses official Microsoft, Xbox and Minecraft services to validate the session, Minecraft Java Edition ownership and player profile. It does not ask users to enter their Microsoft password into the launcher's own interface. Microsoft login credentials saved on Windows are protected with DPAPI, without a plaintext fallback.
 
-**Current status:** this project's own public-client configuration and relevant service access are still being prepared. Real-account Microsoft sign-in has not completed release acceptance. Application registration, service access and individual user consent are separate requirements; sign-in configuration must use a public Client ID owned by or explicitly authorized for this project.
+**Current status:** Microsoft sign-in includes this project's public-client configuration. Mojang service access and actual real-account sign-in results still need confirmation; real-account Microsoft sign-in has not completed release acceptance. Test with an account that owns Minecraft Java Edition. Application registration, service access and individual user consent are separate requirements; built-in configuration alone does not establish successful sign-in.
 
 ### Account availability
 
@@ -92,7 +92,7 @@ The Microsoft sign-in implementation opens the system browser and uses the OAuth
 | Any other country or region (including `HK`, `MO` and `TW`) | Official Microsoft accounts only, with Minecraft ownership verified |
 | Not yet detected, detecting, failed or expired | Official Microsoft accounts only, with Minecraft ownership verified |
 
-Without Microsoft configuration, that sign-in flow is unavailable, so no account can be added where Microsoft is required.
+The distributed desktop builds include Microsoft sign-in configuration; users do not need to supply a Client ID. If a build lacks valid Microsoft configuration, that sign-in flow is unavailable, so no account can be added where Microsoft is required.
 
 LittleSkin is an address suggestion, not automatic trust. External authentication sends that service's credentials only after the user explicitly trusts the selected service. **Do not enter a Microsoft password into an external-authentication form.** External or local identities do not establish Minecraft ownership or grant access to official online services.
 
@@ -102,7 +102,8 @@ Linux saves online credentials through the desktop's Secret Service keyring, suc
 
 ### Local data
 
-- New installs use per-user local application data; an existing `mclauncher-qt-data` beside the program stays in use.
+- For new installs, data defaults to `mclauncher-qt-data` beside the program when the program's directory accepts files; otherwise it falls back to per-user local application data.
+- An existing `mclauncher-qt-data` beside the program stays in use. If none exists, existing per-user data stays in use instead of switching to a new program-side directory. Explicit options below override this automatic selection.
 - `--portable` uses the directory beside the Windows EXE or Linux AppImage. AppImage portable data stays beside the downloaded file, outside its temporary mount. `--data-root` sets an absolute path and takes precedence.
 - Data never moves between locations on its own. Close the game and launcher before backing up or moving the whole directory.
 
