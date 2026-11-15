@@ -1022,3 +1022,53 @@ jobs:
         run: |
           python3 release-tools/.github/scripts/prune-published-artifacts.py \
             --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" --run-id "$GITHUB_RUN_ID"
+
+  # Android is an additional download and never part of the desktop release
+  # decision: publish above neither waits for it nor sees its artifact. The
+  # package is attached afterwards, and only when it was signed with the
+  # project's own key (see android-build.yml for the secrets). A failure here
+  # leaves the published Windows and Linux packages exactly as they are.
+  build-android:
+    name: Build android-arm64
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.platform == 'both' || !inputs.platform)
+    needs: resolve-source
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-build.yml
+    with:
+      source_ref: ${{ needs.resolve-source.outputs.commit }}
+      source_tag: ${{ !needs.resolve-source.outputs.commit && inputs.tag || '' }}
+      release_tag: ${{ inputs.tag }}
+      upload_apk: true
+    secrets: inherit
+
+  publish-android:
+    name: Attach the signed Android package
+    needs: [publish, build-android]
+    if: always() && needs.publish.result == 'success' && needs.build-android.result == 'success' && needs.build-android.outputs.signed == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download the signed Android package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-package-${{ inputs.tag }}
+          path: android-package
+
+      - name: Checkout public release tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: release-tools
+          persist-credentials: false
+
+      - name: Verify and attach the Android package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ inputs.tag }}
+        run: |
+          python3 release-tools/.github/scripts/android_release.py attach \
+            --repository "$GITHUB_REPOSITORY" --tag "$VERSION_TAG" --package android-package
