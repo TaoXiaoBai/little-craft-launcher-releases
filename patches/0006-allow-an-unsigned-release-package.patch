@@ -1,0 +1,29 @@
+From c8f33a0852dcdb24ad31582de7991efbf557a903 Mon Sep 17 00:00:00 2001
+From: Tao Xiaobai <1599170798@qq.com>
+Date: Sun, 15 Nov 2026 03:43:21 +0000
+Subject: [PATCH] Little Craft Launcher: allow an unsigned release package
+
+-PlclUnsigned builds the release variant without the upstream signing
+configuration; the package is then signed outside the build.
+---
+ app_pojavlauncher/build.gradle | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/app_pojavlauncher/build.gradle b/app_pojavlauncher/build.gradle
+index a4f11af..e16bcee 100644
+--- a/app_pojavlauncher/build.gradle
++++ b/app_pojavlauncher/build.gradle
+@@ -151,7 +151,9 @@ android {
+             // Don't set to true or java.awt will be a.a or something similar.
+             minifyEnabled false
+             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+-            signingConfig signingConfigs.customRelease
++            // Little Craft Launcher: -PlclUnsigned leaves the release package
++            // unsigned so that its publisher signs it with their own key.
++            signingConfig providers.gradleProperty('lclUnsigned').isPresent() ? null : signingConfigs.customRelease
+             // defaultConfig already set
+             // multiDexEnabled = true
+             // debuggable = true
+-- 
+2.43.0
+

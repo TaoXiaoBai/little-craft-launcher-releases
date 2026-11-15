@@ -28,6 +28,10 @@ for p in ../patches/*.patch; do [ -e "$p" ] && git am "$p"; done
 ./gradlew :app_pojavlauncher:assembleDebug
 ```
 
+Published packages are the release variant built with
+`./gradlew :app_pojavlauncher:assembleRelease -PlclUnsigned` and signed with the
+launcher's own key afterwards.
+
 The **Android runtime** workflow of this repository does exactly this. Each
 released Android build of the launcher states the commit of this branch it was
 built from, so the matching source can always be retrieved.
