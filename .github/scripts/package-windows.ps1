@@ -161,6 +161,18 @@ $testArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Pa
 # Omitting the new parameter in full mode keeps generic use with older source
 # tags compatible. The sharded prerelease workflow checks support beforehand.
 if ($TestShard -ceq 'primary') { $testArguments += @('-TestShard', 'primary') }
+# The release identity the update check compares with the public releases,
+# derived exactly like the Linux builds and the Windows companion
+# (release_identity.py). A source whose driver predates the parameter is
+# built without one, as before.
+$identityFile = Join-Path $env:RUNNER_TEMP 'mcl-release-identity.txt'
+RunProgram $python @('-c', 'import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from release_identity import release_identity; Path(sys.argv[3]).write_text(release_identity(sys.argv[2]), encoding="ascii")', $PSScriptRoot, $VersionTag, $identityFile) 'release-identity' 1
+$releaseIdentity = [IO.File]::ReadAllText($identityFile).Trim()
+$tokens = $null; $parseErrors = $null
+$driverAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $scripts 'ci-build-test.ps1'), [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw 'The source build driver does not parse.' }
+$driverParameters = @($driverAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+if ($releaseIdentity -and $driverParameters -ccontains 'ReleaseIdentity') { $testArguments += @('-ReleaseIdentity', $releaseIdentity) }
 RunProgram $pwsh $testArguments 'build-and-local-tests' 100 @{ GITHUB_SHA = $sourceCommit }
 
 $qt = Ordinary (Join-Path $native '.tools/Qt/6.8.3/mingw_64') $true

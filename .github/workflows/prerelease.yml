@@ -140,6 +140,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows independent bundle smoke assertions failed.' }
           python -m unittest discover -s builder/.github/scripts -p test_release_support_bundle.py
           if ($LASTEXITCODE -ne 0) { throw 'Versioned bundle release directions failed.' }
+          python -m unittest discover -s builder/.github/scripts -p test_release_identity.py
+          if ($LASTEXITCODE -ne 0) { throw 'Release identity forwarding assertions failed.' }
 
       - name: Prepare private source and verify release inputs
         uses: ./builder/.github/actions/prepare-source
@@ -497,9 +499,12 @@ jobs:
             python builder/.github/scripts/fetch-linux-tools.py --tool-dir "$RUNNER_TEMP/linuxdeploy-tools" --source-root "$GITHUB_WORKSPACE/source"
             python builder/.github/scripts/verify-cache-inputs.py --kind qt-source-archives --source-root "$GITHUB_WORKSPACE/source" --include-wayland
             echo 'legal_archives_verified=true' >> "$GITHUB_OUTPUT"
+            # The update check compares this build's release identity with the
+            # public releases; primary and companion must configure the same value.
+            release_identity="$(python builder/.github/scripts/release_identity.py "$VERSION_TAG")"
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF -DMCL_SERIALIZE_SOFTWARE_UI=ON \
-              -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root"
+              -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root" -DMCL_RELEASE_IDENTITY="$release_identity"
             cmake --build "$RUNNER_TEMP/build-linux" --target mclauncher-qt --parallel "$build_jobs"
             python builder/.github/scripts/package-linux.py --source-root "$GITHUB_WORKSPACE/source" \
               --build-dir "$RUNNER_TEMP/build-linux" --qt-root "$qt_root" \
@@ -704,6 +709,8 @@ jobs:
       - name: Build and test Windows companion privately
         id: windows-companion
         shell: pwsh
+        env:
+          VERSION_TAG: ${{ inputs.tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           $logs = Join-Path $env:RUNNER_TEMP 'private-build-logs'
@@ -721,8 +728,18 @@ jobs:
               --cache-root (Join-Path $env:RUNNER_TEMP 'mcl-ci-archives') *> (Join-Path $logs 'verify-archives.log')
             if ($LASTEXITCODE -ne 0) { throw 'Public toolchain verification failed.' }
             [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "toolchain_verified=true`n", [Text.UTF8Encoding]::new($false))
-            & pwsh -NoLogo -NoProfile -NonInteractive -File (Join-Path $scripts 'ci-build-test.ps1') `
-              -Run -Mode dynamic -TestShard companion *> (Join-Path $logs 'windows-companion.log')
+            # Same release identity as the primary build (see package-windows.ps1);
+            # sources whose driver predates the parameter are built without one.
+            $companionArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $scripts 'ci-build-test.ps1'),
+              '-Run', '-Mode', 'dynamic', '-TestShard', 'companion')
+            $releaseIdentity = (& python builder/.github/scripts/release_identity.py $env:VERSION_TAG)
+            if ($LASTEXITCODE -ne 0) { throw 'The release identity could not be derived.' }
+            $releaseIdentity = ([string]$releaseIdentity).Trim()
+            $tokens = $null; $parseErrors = $null
+            $driverAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $scripts 'ci-build-test.ps1'), [ref]$tokens, [ref]$parseErrors)
+            $driverParameters = @($driverAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+            if ($releaseIdentity -and $driverParameters -ccontains 'ReleaseIdentity') { $companionArguments += @('-ReleaseIdentity', $releaseIdentity) }
+            & pwsh @companionArguments *> (Join-Path $logs 'windows-companion.log')
             if ($LASTEXITCODE -ne 0) { throw 'Companion tests failed.' }
             $env:GITHUB_SHA = $workflowSha
             & python builder/.github/scripts/ci_test_proof.py create `
@@ -885,6 +902,8 @@ jobs:
 
       - name: Build and test Linux companion privately
         id: linux-companion
+        env:
+          VERSION_TAG: ${{ inputs.tag }}
         run: |
           mkdir -p "$RUNNER_TEMP/private-build-logs"
           if ! bash -euo pipefail > "$RUNNER_TEMP/private-build-logs/linux-companion.log" 2>&1 <<'BUILD'
@@ -896,9 +915,12 @@ jobs:
             export QT_PLUGIN_PATH="$qt_root/plugins"
             export QML_IMPORT_PATH="$qt_root/qml"
             export QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QML_DISABLE_DISK_CACHE=1
+            # The update check compares this build's release identity with the
+            # public releases; primary and companion must configure the same value.
+            release_identity="$(python builder/.github/scripts/release_identity.py "$VERSION_TAG")"
             cmake -S source/qt-native -B "$RUNNER_TEMP/build-linux" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DMCL_STATIC_RELEASE=OFF -DMCL_SERIALIZE_SOFTWARE_UI=ON \
-              -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root"
+              -DMCL_DISTRIBUTION_BUILD=OFF -DCMAKE_PREFIX_PATH="$qt_root" -DMCL_RELEASE_IDENTITY="$release_identity"
             cmake --build "$RUNNER_TEMP/build-linux" --parallel "$build_jobs"
             python builder/.github/scripts/run-linux-test-shard.py \
               --source-root "$GITHUB_WORKSPACE/source" --build-dir "$RUNNER_TEMP/build-linux" --shard companion \
