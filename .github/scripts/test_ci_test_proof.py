@@ -468,6 +468,21 @@ class CreateTelemetryProof(CreateProof):
             with self.assertRaisesRegex(P.ProofError, 'SHARD_IDENTITY_MISMATCH'):
                 P.combine(first, second, ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
 
+    def test_primary_and_companion_must_share_the_release_identity(self):
+        # release_identity.py derives MCL_RELEASE_IDENTITY from the run's tag for
+        # every build; a companion configured differently cannot be combined.
+        def proof(identity, shard):
+            self.select(shard)
+            self.cache['MCL_RELEASE_IDENTITY'] = identity
+            self.put(self.build / 'CMakeCache.txt', '\n'.join(k + ':STRING=' + v for k, v in self.cache.items()))
+            return P.create_proof(self.args, ENV)
+        primary = proof('v1.0.0-pre.15', 'primary')
+        combined = P.combine(primary, proof('v1.0.0-pre.15', 'companion'), ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
+        self.assertEqual(combined['status'], 'PASS_COMBINED_CURRENT_CTEST')
+        for other in ('v1.0.0-pre.14', ''):
+            with self.assertRaisesRegex(P.ProofError, 'SHARD_IDENTITY_MISMATCH'):
+                P.combine(primary, proof(other, 'companion'), ENV['GITHUB_REPOSITORY'], ENV['GITHUB_SHA'], 99, 1)
+
     def test_missing_effective_telemetry_header_blocks_proof(self):
         (self.build / 'generated/telemetry_build_config.h').unlink()
         with self.assertRaisesRegex(P.ProofError, 'TELEMETRY_CONFIGURATION_MISSING'):
