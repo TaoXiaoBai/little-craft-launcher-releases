@@ -8,4 +8,4 @@
 - 两平台发布必须同源码、同公开编译配置、匹配最终包哈希，且证明用途为 release。显式 `source_commit` 的 test 构建与旧 v1 证明只能只验证，不能改成发布资格。
 - 独立发布先完成 `verify_only`，再按当前任务已有授权发布；已授权的 `platform=both` 流程会内置完整校验后自动发布。已有授权不重复询问，没有发布授权时仅保留验证产物。
 - 桌面预发布只提供 Windows 单 EXE ZIP 与 Linux AppImage，保持 prerelease、`latest=false`，不改写旧 release 或资产。
-- Android APK 是附加下载，不参与桌面发布的判定：`platform=both` 时同源码构建 release 变体，仅在配置了项目自有签名密钥（`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`）且桌面两包已发布后，才追加到同一个 prerelease 并写明校验值与运行时源码位置。未配置密钥时只构建校验、不上传；不得用公开的 debug 密钥签名发布，也不得更换已发布过的签名密钥。
+- Android APK 是附加下载，不参与桌面发布的判定：`platform=both` 且 `include_android=true`（默认）时同源码构建 release 变体；纯桌面发布显式设置 `include_android=false`。仅在配置了项目自有签名密钥（`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`）且桌面两包已发布后，才追加到同一个 prerelease 并写明校验值与运行时源码位置。未配置密钥时只构建校验、不上传；不得用公开的 debug 密钥签名发布，也不得更换已发布过的签名密钥。

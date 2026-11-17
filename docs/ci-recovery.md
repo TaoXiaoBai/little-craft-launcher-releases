@@ -132,12 +132,12 @@ gh run watch LINUX_RUN_ID --repo TaoXiaoBai/little-craft-launcher-releases --exi
 
 修复验证通过并合入 `master` 后，选择尚未发布的 `v1.0.0-pre.N`，先在公开仓库提交该版本的 `.github/release-notes/<tag>.md`。正常构建不传 `source_commit`，由 resolver 读取同名私有 tag，或在没有该 tag 时锁定默认分支提交。
 
-如果当前任务已经明确授权立即发布，可以用一次 `platform=both`：它只解析一次源码，并在两平台完整验证后自动发布。
+如果当前任务已经明确授权立即发布，可以用一次 `platform=both`：它只解析一次源码，并在两平台完整验证后自动发布。纯桌面发布设置 `include_android=false`，只提供 Windows ZIP 和 Linux AppImage；需要同时构建 Android 实验包时，使用默认的 `include_android=true`，其签名及附加发布条件保持不变。
 
 ```sh
 version_tag='v1.0.0-pre.N'
 gh workflow run prerelease.yml --repo TaoXiaoBai/little-craft-launcher-releases \
-  --ref main -f tag="$version_tag" -f platform=both
+  --ref main -f tag="$version_tag" -f platform=both -f include_android=false
 ```
 
 若要先验证后审阅，正常派发两个单平台构建，再走下一节的只验证流程：
