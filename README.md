@@ -19,44 +19,48 @@ Windows 10/11 x64 · Linux x86_64 · Twelve themes + one experimental theme · Q
 ![Launchpad development preview](assets/launchpad-home.png)
 
 > [!NOTE]
-> **1.0.0 is in prerelease testing.** The pre.7 update adds Linux game launch, managed Java and system-keyring credential storage, with a single AppImage for Linux and a ZIP for Windows. Download available builds from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases) and read their installation and account requirements. There is no stable release yet.
->
-> Interface previews use Simplified Chinese. The screenshots show development windows, not a released Windows build.
+> **1.0.0 is in prerelease testing.** Get available builds from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases). Each version's notes list its changes, requirements and SHA-256 checksums. There is no stable release yet.
 
 ## Try the prerelease
 
-1. **Download and verify.** Get a build from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), read its notes and check the SHA-256. From pre.10, the Windows ZIP contains one `mclauncher-qt.exe` with its runtime embedded; extract it and run it. Earlier Windows packages need to be extracted in full. [Windows packaging (简体中文)](docs/WINDOWS_DISTRIBUTION.md)
-2. **Add an account and choose Java.** Which account types you can use depends on your region; see [Accounts and data](#accounts-and-data).
-3. **Create or import an instance.** Pick a game version and loader, wait for the game files, then launch from Home. Back up your worlds before changing versions or modpacks.
+| Platform | Download | Start |
+| --- | --- | --- |
+| Windows 10/11 x64 | Windows ZIP | Extract and run the single `mclauncher-qt.exe`; its runtime is embedded. |
+| Linux x86_64 · Ubuntu 22.04+ | Linux AppImage | Make the file executable, then run it on X11/XWayland or Wayland. |
+
+1. **Download and verify.** Choose the package for your platform from [Releases](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases), then check its SHA-256. [Windows packaging (简体中文)](docs/WINDOWS_DISTRIBUTION.md)
+2. **Add an account and choose Java.** Use a compatible Java installation already on your computer, or download a managed runtime in the launcher. See [Accounts and data](#accounts-and-data) for account availability.
+3. **Create or import an instance.** Choose a game version and loader, wait for the files to finish downloading, then launch from Home. Back up your worlds before changing versions or modpacks.
 
 Minecraft, Java and account credentials are not bundled.
 
 ### Linux AppImage
 
-The pre.7 AppImage targets Ubuntu 22.04 or newer on x86_64, with X11/XWayland or Wayland. Make the downloaded file executable and run it. Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. Qt is bundled; graphics drivers and desktop services come from the system.
+Without FUSE, use `./LittleCraftLauncher-<version>-linux-x86_64.AppImage --appimage-extract`, then run `./squashfs-root/AppRun`. Qt is bundled; graphics drivers and desktop services come from the system.
 
 Linux supports game launch and downloads of the official Java 8/17/21/25 runtimes. You can also select a locally installed Java that matches the game version. Saving online credentials requires an available system keyring; see [Accounts and data](#accounts-and-data).
-
-The older [v1.0.0-pre.4](https://github.com/TaoXiaoBai/little-craft-launcher-releases/releases/tag/v1.0.0-pre.4) remains an interface preview without these Linux features. Its TAR package must be extracted in full and started through `LittleCraftLauncher`; running its inner ELF directly can bypass the runtime setup. Existing pre.4 downloads are unchanged.
 
 ## What it does
 
 | What you need | What the launcher provides |
 | --- | --- |
-| Separate setups | Create, copy and import instances, each with its own game version, Java, memory and launch settings. Export a modpack when you want to share one. |
+| Separate setups | Create, copy and import instances, each with its own game version, Java, memory, launch arguments and server address. Export a modpack when you want to share one. |
 | Compatible content | Browse mods, resource packs and modpacks; review dependencies, changes and the target instance before installing. |
 | Favourite mods, reused | Save Modrinth projects and find compatible versions for another instance, instead of copying old JARs. |
 | Worlds you can return to | Back up and export worlds, and preview an import or restore before applying it. |
+| Files around your worlds | Manage screenshots and schematics, and inspect or edit NBT data. Back up files before editing them. |
+| Playing together | Create or join a room through the Terracotta integration, with your consent before downloading its component. Multi-device testing is still in progress. |
 | Useful feedback | Inspect tasks, logs and diagnostics, and review memory risks before launching. A memory advisory is not a compatibility or FPS verdict. |
+| Updates and language | Check for updates under About and open the release page. Choose Simplified Chinese, English or automatic language selection; some diagnostics and experimental text remain Chinese. |
 
 Current scope:
 
-- **Loaders**: Vanilla, Fabric and Quilt install directly. The native Forge installer currently targets Minecraft **1.20.1** only, and NeoForge **1.21.1** only. Other combinations are limited to what the app offers, with no compatibility promise.
+- **Loaders**: Vanilla, Fabric and Quilt install directly. Forge discovers compatible versions from Minecraft **1.18** onwards; NeoForge from **1.20.2** onwards, using official catalogues and supported installer formats. Available combinations are shown in the app. Older Forge versions such as 1.12.2 and 1.16.5, and NeoForge 1.20.1, are not supported. Installer format changes can still require adaptation.
 - **Modpacks**: Modrinth packs can be previewed and installed as new instances. CurseForge needs an authorized API key for the current session, and its catalogue cannot create a modpack instance directly yet; local pack import works instead.
 
 ## Appearance
 
-All twelve themes share the same pages and controls. Choose under **Settings → Appearance** when no game, sign-in or file operation is active; every theme supports reduced motion, and the lantern keeps its colours throughout. New installs start on Launchpad; existing data keeps its theme.
+Choose under **Settings → Appearance** when no game, sign-in or file operation is active. Themes offer different layouts for the same core functions, support reduced motion, and keep the lantern's original colours. You can also choose a local image as the window background. New installs start on Launchpad; existing data keeps its theme.
 
 | Theme | What it looks like |
 | --- | --- |
@@ -74,15 +78,15 @@ All twelve themes share the same pages and controls. Choose under **Settings →
 | **Koring Glass** | **Lumina** |
 | ![Koring Glass theme home](assets/koring-home-idle.png) | ![Lumina theme home](assets/lumina-home.png) |
 
-These are real Qt development windows captured on Linux with software rendering and demonstration data. They do not establish Windows acceptance, real-account sign-in, game launch or frame rate. [Screenshot provenance and artwork credits](assets/README.md).
+Screenshots show Qt development windows on Linux with demonstration data. Appearance can vary by platform and version. [Screenshot provenance and artwork credits](assets/README.md).
 
 ## Accounts and data
 
 ### Microsoft sign-in
 
-The Microsoft sign-in implementation opens the system browser and uses the OAuth authorization-code flow with S256 PKCE and a local loopback callback. It then uses official Microsoft, Xbox and Minecraft services to validate the session, Minecraft Java Edition ownership and player profile. It does not ask users to enter their Microsoft password into the launcher's own interface. Microsoft login credentials saved on Windows are protected with DPAPI, without a plaintext fallback.
+Microsoft sign-in opens your system browser and uses official Microsoft, Xbox and Minecraft services to validate the session, Minecraft Java Edition ownership and player profile. The launcher does not ask you to enter your Microsoft password into its own interface. Saved online credentials on Windows use DPAPI protection, without a plaintext fallback.
 
-**Current status:** Microsoft sign-in includes this project's public-client configuration. Mojang service access and actual real-account sign-in results still need confirmation; real-account Microsoft sign-in has not completed release acceptance. Test with an account that owns Minecraft Java Edition. Application registration, service access and individual user consent are separate requirements; built-in configuration alone does not establish successful sign-in.
+**Testing status:** The distributed builds include this project's Microsoft client configuration. Use an account that owns Minecraft Java Edition; real-account release acceptance and Mojang service access still need confirmation.
 
 ### Account availability
 
@@ -91,8 +95,6 @@ The Microsoft sign-in implementation opens the system browser and uses the OAuth
 | Mainland China (`CN`, while the result is still valid) | Microsoft; LittleSkin or another external authentication service you explicitly trust; a local offline identity |
 | Any other country or region (including `HK`, `MO` and `TW`) | Official Microsoft accounts only, with Minecraft ownership verified |
 | Not yet detected, detecting, failed or expired | Official Microsoft accounts only, with Minecraft ownership verified |
-
-The distributed desktop builds include Microsoft sign-in configuration; users do not need to supply a Client ID. If a build lacks valid Microsoft configuration, that sign-in flow is unavailable, so no account can be added where Microsoft is required.
 
 LittleSkin is an address suggestion, not automatic trust. External authentication sends that service's credentials only after the user explicitly trusts the selected service. **Do not enter a Microsoft password into an external-authentication form.** External or local identities do not establish Minecraft ownership or grant access to official online services.
 
