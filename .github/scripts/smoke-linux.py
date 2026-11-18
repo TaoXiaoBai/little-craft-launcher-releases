@@ -388,6 +388,31 @@ def wayland_window_visible(log: Path) -> bool:
     return False
 
 
+def reported_startup_failure(log: Path) -> str | None:
+    """The reason the launcher printed for a failed start, if it printed one.
+
+    A desktop start that cannot open its data directory prints a
+    {"status":"FAILED",...} line and then shows an error window. That window is
+    an owned, visible toplevel like the real one, so the printed result decides:
+    a start that reported a failure never passes, whatever is on screen.
+    """
+    try:
+        text = log.read_text(errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("status") == "FAILED":
+            return str(value.get("error") or "no reason given")[:500]
+    return None
+
+
 def smoke_case(command: list[str], base: dict[str, str], directory: Path, backend: str,
                extracted: Path | None, temporary: Path, tag: str, deadline: float,
                startup_timeout: float, observe_seconds: float, appimage: bool = False):
@@ -409,6 +434,10 @@ def smoke_case(command: list[str], base: dict[str, str], directory: Path, backen
                 remaining(startup_deadline)
                 if owned.process.poll() is not None:
                     raise RuntimeError(f"GUI exited before verification ({owned.process.returncode})")
+                # Printed before any error window exists, so it is seen first.
+                failure = reported_startup_failure(log)
+                if failure is not None:
+                    raise RuntimeError("The launcher reported a startup failure: " + failure)
                 valid = False
                 for pid in owned.tracked_pids():
                     try:
@@ -440,6 +469,9 @@ def smoke_case(command: list[str], base: dict[str, str], directory: Path, backen
                     if ready_since is None:
                         ready_since = time.monotonic()
                     if time.monotonic() - ready_since >= observe_seconds:
+                        failure = reported_startup_failure(log)
+                        if failure is not None:
+                            raise RuntimeError("The launcher reported a startup failure: " + failure)
                         print(f"PASS {directory.name}: real {backend} window; packaged Qt/QPA/QML observed ({len(observed)} Qt objects)", flush=True)
                         return
                 else:

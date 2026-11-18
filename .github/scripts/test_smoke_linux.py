@@ -472,5 +472,68 @@ class WindowEvidenceTests(unittest.TestCase):
             self.assertFalse(SMOKE.x11_window_visible(source, 123, SMOKE.time.monotonic() + 10))
 
 
+class StartupFailureTests(unittest.TestCase):
+    """A startup error window is a visible owned toplevel too; the printed result decides."""
+
+    def test_a_printed_failure_is_found_among_other_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "gui.log"
+            log.write_text("\n".join([
+                "qt.qpa.wayland: loaded",
+                " -> wl_display@1.get_registry(new id wl_registry@2)",
+                '{"error":"Native data root is already in use; no second writer started","status":"FAILED"}',
+                " -> xdg_wm_base@3.get_xdg_surface(new id xdg_surface@4, wl_surface@5)",
+            ]))
+            self.assertEqual(SMOKE.reported_startup_failure(log),
+                             "Native data root is already in use; no second writer started")
+            log.write_text('{"status": "FAILED"}\n')
+            self.assertEqual(SMOKE.reported_startup_failure(log), "no reason given")
+
+    def test_other_output_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "gui.log"
+            self.assertIsNone(SMOKE.reported_startup_failure(log))  # nothing written yet
+            for text in ("", "plain text FAILED\n", '{"status":"FAILED"\n', '["FAILED"]\n',
+                         '{"status":"ACTIVATED_RUNNING_INSTANCE"}\n', '{"status":"failed"}\n',
+                         '{"state":"FAILED"}\n'):
+                with self.subTest(text=text):
+                    log.write_text(text)
+                    self.assertIsNone(SMOKE.reported_startup_failure(log))
+
+    def test_a_reported_failure_stops_the_case_before_any_window_counts(self):
+        class Running:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        class FailedStart:
+            def __init__(self, argv, env, log, cwd, deadline):
+                self.log = log
+                self.process = Running()
+
+            def __enter__(self):
+                # The launcher prints its result, then would show its error window.
+                self.log.write_text('{"error":"data directory needs migration","status":"FAILED"}\n')
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def tracked_pids(self):
+                return ()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            started = SMOKE.time.monotonic()
+            with mock.patch.object(SMOKE, "OwnedProcess", FailedStart), \
+                    mock.patch.object(SMOKE, "x11_window_visible", return_value=True), \
+                    mock.patch.object(SMOKE, "wayland_window_visible", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "reported a startup failure: data directory needs migration"):
+                    SMOKE.smoke_case(["launcher"], {"PATH": SMOKE.SYSTEM_PATH}, root / "xcb-apprun", "xcb",
+                                     None, root, "v0", started + 60, 30, 2)
+            self.assertLess(SMOKE.time.monotonic() - started, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
