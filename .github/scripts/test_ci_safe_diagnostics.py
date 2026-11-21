@@ -55,6 +55,25 @@ class SafeDiagnosticsTests(unittest.TestCase):
                           str(self.source).encode()):
             self.assertNotIn(forbidden, data)
 
+    def test_skip_and_expected_failure_locations_are_not_failures(self):
+        path = self.source / self.paths[0]
+        raw = ("SKIP   : Fixture::symlinks() Host does not permit creating directory symlinks\n"
+               f"   Loc: [{path}(110)]\n"
+               "XFAIL  : Fixture::known() expected\n"
+               f"   Loc: [{path}(120)]\n"
+               "12: FAIL!  : Fixture::real() returned FALSE\n"
+               f"12:    Loc: [{path}(130)]\n"
+               "XPASS  : Fixture::unexpected() passed\n"
+               f"   Loc: [{path}(140)]\n"
+               "SKIP   : Fixture::later() skipped\n"
+               f"   Loc: [{path}(150)]\n")
+        summary = self.make(raw)
+        self.assertEqual([location['line'] for location in summary['locations']], [130, 140])
+        self.assertEqual(summary['categories'], ['TEST_FAILURE'])
+        # A location without any preceding result tag is still reported.
+        summary = self.make(f"   Loc: [{path}(160)]\n")
+        self.assertEqual([location['line'] for location in summary['locations']], [160])
+
     def test_windows_qttest_and_msvc_locations(self):
         root = 'D:/a/owned-builder/owned-builder/source'
         text = (f'{root}/{self.paths[0]}(400) : failure location\n'
