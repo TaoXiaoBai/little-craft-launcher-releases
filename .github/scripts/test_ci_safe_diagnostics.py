@@ -194,7 +194,13 @@ class SafeDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = json.loads(output.read_text())
         self.assertEqual(summary['runId'], 33)
-        self.assertEqual(result.stdout.strip(), 'SAFE_DIAGNOSTIC_CREATED')
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[-1], 'SAFE_DIAGNOSTIC_CREATED')
+        self.assertEqual(len(lines), 2)
+        prefix = 'SAFE_DIAGNOSTIC_SUMMARY '
+        self.assertTrue(lines[0].startswith(prefix))
+        self.assertEqual(json.loads(lines[0][len(prefix):]), summary)
+        self.assertEqual(lines[0][len(prefix):] + '\n', output.read_text())
         self.assertEqual(result.stderr, '')
 
 
