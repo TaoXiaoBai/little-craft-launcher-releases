@@ -74,6 +74,21 @@ class SafeDiagnosticsTests(unittest.TestCase):
         summary = self.make(f"   Loc: [{path}(160)]\n")
         self.assertEqual([location['line'] for location in summary['locations']], [160])
 
+    def test_windows_skip_locations_are_not_failures(self):
+        root = 'D:/a/owned-builder/owned-builder/source'
+        raw = ("SKIP   : Fixture::symlinks() Host does not permit creating directory symlinks\n"
+               f"{root}/{self.paths[0]}(110) : failure location\n"
+               "QWARN  : Fixture::real() noisy\n"
+               f"{root}/{self.paths[0]}(115) : message location\n"
+               "FAIL!  : Fixture::real() returned FALSE\n"
+               f"{root}/{self.paths[0]}(130) : failure location\n"
+               "SKIP   : Fixture::later() skipped\n"
+               f"{root}/{self.paths[0]}(150) : failure location\n"
+               f"{root}/{self.paths[0]}(170): error: compiler errors are never suppressed\n")
+        summary = self.make(raw, recorded_source_root=root)
+        self.assertEqual([(location['line'], location['category']) for location in summary['locations']],
+                         [(130, 'TEST_FAILURE'), (170, 'COMPILER_ERROR')])
+
     def test_windows_qttest_and_msvc_locations(self):
         root = 'D:/a/owned-builder/owned-builder/source'
         text = (f'{root}/{self.paths[0]}(400) : failure location\n'
