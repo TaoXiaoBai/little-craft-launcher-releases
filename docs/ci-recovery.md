@@ -48,6 +48,8 @@ python3 "$public_checkout/.github/scripts/ci_triage.py" \
 
 工作流上传 `safe-diagnostics-<platform>-attempt-N`，归档内部只有 `summary.json`，保留 14 天。平台包括 `windows-x64`、`linux-x86_64`、两种 `*-ui-companion`、`android`、`windows-build`、`windows-ui`、`windows-bundle` 和 `windows-benchmark`。
 
+同一份已通过自检的摘要也会以 `SAFE_DIAGNOSTIC_SUMMARY <JSON>` 一行打印在对应 job 的“Write safe CI summary”步骤日志里，内容与 artifact 完全相同；无法下载 artifact 时，可从公开 job 日志取这一行保存为 `summary.json`，再用 `--summary-file` 离线定位。
+
 摘要包含 run/attempt、源码提交、受控错误类别、已公开的失败测试组、源码文件指纹及行列号。它不包含原始路径、源码、断言内容、测试数据行、用户名、令牌或原始日志。工具在私有 checkout 的对应 Git tree 中匹配文件指纹，通过 `git show` 只在本地显示实际文件与代码位置。
 
 `summary.status` 是生成摘要时的快照；之后加密或上传产物仍可能失败。远程命令会另外返回 `outcomes`，显示所选 attempt 的 run、对应 job 的最新 API 状态与结论，以及失败的公开步骤名。命令退出码 0 只表示诊断读取成功，不表示 CI 通过；判断 CI 结果先看 `outcomes`，`in_progress` 不能算通过，也不能拿摘要里的 `passed` 覆盖后续失败。明确指定历史 `--attempt N` 时，显示该次 attempt 的结果；离线 `--summary-file` 没有核验最终状态，`outcomes` 为 `null`。`--safe-only` 同样会显示公开状态信息，但不输出私有文件路径或源码。

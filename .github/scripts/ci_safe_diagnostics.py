@@ -340,6 +340,7 @@ def write_summary(path, summary):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('xb') as target:
         target.write(data)
+    return data
 
 
 def main(argv=None):
@@ -359,10 +360,13 @@ def main(argv=None):
         summary = create_summary(args.source_root, args.logs_dir, args.platform, args.status,
             run_id=args.run_id, run_attempt=args.attempt, workflow_commit=args.workflow_commit,
             recorded_source_root=args.recorded_source_root)
-        write_summary(args.output, summary)
+        data = write_summary(args.output, summary)
     except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError):
         print('SAFE_DIAGNOSTIC_REJECTED')
         return 1
+    # The validated summary is public by design (it is also a public artifact).
+    # Echo it so readers without artifact download access can triage from the log.
+    print('SAFE_DIAGNOSTIC_SUMMARY ' + data.decode('ascii').strip())
     print('SAFE_DIAGNOSTIC_CREATED')
     return 0
 
