@@ -48,7 +48,7 @@ python3 "$public_checkout/.github/scripts/ci_triage.py" \
 
 工作流上传 `safe-diagnostics-<platform>-attempt-N`，归档内部只有 `summary.json`，保留 14 天。平台包括 `windows-x64`、`linux-x86_64`、两种 `*-ui-companion`、`android`、`windows-build`、`windows-ui`、`windows-bundle` 和 `windows-benchmark`。
 
-同一份已通过自检的摘要也会以 `SAFE_DIAGNOSTIC_SUMMARY <JSON>` 一行打印在对应 job 的“Write safe CI summary”步骤日志里，内容与 artifact 完全相同；无法下载 artifact 时，可从公开 job 日志取这一行保存为 `summary.json`，再用 `--summary-file` 离线定位。
+同一份已通过自检的摘要也会以 `SAFE_DIAGNOSTIC_SUMMARY <JSON>` 一行打印在对应 job 的“Write safe CI summary”步骤日志里，内容与 artifact 完全相同；无法下载 artifact 时，可从公开 job 日志取这一行保存为 `summary.json`，再用 `--summary-file` 离线定位。日志里的 `sourceCommit` 会被 Actions 遮罩成 `***`，保存前要换回该 run 实际构建的完整 40 位源码提交（显式 `source_commit` 的测试构建就是派发时的输入值）。
 
 摘要包含 run/attempt、源码提交、受控错误类别、已公开的失败测试组、源码文件指纹及行列号。它不包含原始路径、源码、断言内容、测试数据行、用户名、令牌或原始日志。工具在私有 checkout 的对应 Git tree 中匹配文件指纹，通过 `git show` 只在本地显示实际文件与代码位置。
 
