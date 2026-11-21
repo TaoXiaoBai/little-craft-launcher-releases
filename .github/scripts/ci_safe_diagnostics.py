@@ -35,6 +35,10 @@ HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 QT_LOCATION = re.compile(r'\bLoc:\s*\[(.+)\((\d{1,8})(?:,(\d{1,7}))?\)\]')
+# Qt prints `Loc:` after every located result, including skips and expected
+# failures. Only a non-failing result tag suppresses the location that follows.
+QT_RESULT = re.compile(r'^(?:\s*\d+:)?\s*(FAIL!|XPASS|QFATAL|BFAIL|SKIP|XFAIL|PASS|BPASS|BXFAIL|BXPASS|QWARN|QDEBUG|QINFO|QSYSTEM|QCRITICAL)\s*:')
+QT_NON_FAILURE = frozenset({'SKIP', 'XFAIL', 'PASS', 'BPASS', 'BXFAIL', 'QWARN', 'QDEBUG', 'QINFO', 'QSYSTEM', 'QCRITICAL'})
 WINDOWS_LOCATION = re.compile(r'^\s*(.+?)\((\d{1,8})(?:,(\d{1,7}))?\)\s*:\s*(failure location|(?:fatal\s+)?error\b)')
 COMPILER_LOCATION = re.compile(r'^\s*(.+?):(\d{1,8})(?::(\d{1,7}))?:\s*(?:fatal\s+)?error\b')
 CMAKE_LOCATION = re.compile(r'\bCMake Error (?:at|in) (.+?):(\d{1,8})(?:\s|\()')
@@ -271,11 +275,15 @@ def create_summary(source_root, logs_dir, platform, status, *, run_id, run_attem
             continue
         remaining -= consumed
         truncated = truncated or shortened
+        last_result = None
         for raw in text.splitlines():
             if len(raw) > 16384:
                 truncated = True
                 continue
             line = ANSI.sub('', raw)
+            result = QT_RESULT.match(line)
+            if result:
+                last_result = result[1]
             group = CTEST_GROUP.search(line) or CTEST_FINAL.search(line)
             if group:
                 category = 'TEST_TIMEOUT' if group[2].lower() == 'timeout' else 'TEST_FAILURE'
@@ -295,7 +303,7 @@ def create_summary(source_root, logs_dir, platform, status, *, run_id, run_attem
                 categories.add('PACKAGING_ERROR')
             matches = []
             match = QT_LOCATION.search(line)
-            if match:
+            if match and last_result not in QT_NON_FAILURE:
                 matches.append((match[1], match[2], match[3], 'TEST_FAILURE'))
             match = WINDOWS_LOCATION.search(line)
             if match:
